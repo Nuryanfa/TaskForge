@@ -5,7 +5,7 @@
 
 ## Context
 
-TaskForge must recover job state after process and worker failures. Later
+TaskForge must eventually recover job state after process and worker failures. Later
 releases may use NATS JetStream to wake workers and distribute notifications,
 but introducing two authoritative stores would create ambiguous recovery and
 dual-write failure modes.

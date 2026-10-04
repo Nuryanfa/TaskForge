@@ -22,11 +22,11 @@ important than feature count.
 
 ## Milestone boundaries
 
-v0.1 is limited to PostgreSQL migration execution and repository operations;
+v0.1 implements PostgreSQL migration execution and repository operations;
 submit, get, and cancel HTTP endpoints; sequential single-worker execution; a
 transactional queued-to-running claim; persisted attempts and outcomes;
 database-aware readiness; graceful shutdown; and real PostgreSQL integration
-tests.
+tests. Maintain these behaviors without pulling later milestones forward.
 
 v0.2 introduces bounded concurrent worker goroutines, job leases, fencing
 tokens, lease heartbeat and renewal, expired-lease recovery, and worker crash
@@ -37,9 +37,18 @@ not automatically recovered.
 
 ```bash
 gofmt -w .
+go mod tidy
+go mod verify
 go vet ./...
 go test ./...
 go test -race ./...
 go build ./...
+docker compose config --quiet
 git diff --check
+```
+
+When `TASKFORGE_TEST_DATABASE_URL` is available, also run:
+
+```bash
+go test ./... -run Integration -count=1
 ```

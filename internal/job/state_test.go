@@ -2,27 +2,33 @@ package job
 
 import "testing"
 
-func TestValidateTransition(t *testing.T) {
-	tests := []struct {
-		name    string
-		from    Status
-		to      Status
-		wantErr bool
-	}{
-		{name: "claim queued job", from: StatusQueued, to: StatusRunning},
-		{name: "finish running job", from: StatusRunning, to: StatusSucceeded},
-		{name: "schedule retry", from: StatusRunning, to: StatusRetryScheduled},
-		{name: "release retry", from: StatusRetryScheduled, to: StatusQueued},
-		{name: "reject skipped execution", from: StatusQueued, to: StatusSucceeded, wantErr: true},
-		{name: "reject terminal transition", from: StatusSucceeded, to: StatusQueued, wantErr: true},
+func TestValidateTransitionExhaustive(t *testing.T) {
+	statuses := []Status{StatusQueued, StatusRunning, StatusSucceeded, StatusFailed, StatusCanceled, Status("unknown")}
+	allowed := map[[2]Status]bool{
+		{StatusQueued, StatusRunning}:    true,
+		{StatusQueued, StatusCanceled}:   true,
+		{StatusRunning, StatusSucceeded}: true,
+		{StatusRunning, StatusFailed}:    true,
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateTransition(tt.from, tt.to)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ValidateTransition() error = %v, wantErr %v", err, tt.wantErr)
+	for _, from := range statuses {
+		for _, to := range statuses {
+			err := ValidateTransition(from, to)
+			if allowed[[2]Status{from, to}] != (err == nil) {
+				t.Fatalf("transition %q -> %q returned %v", from, to, err)
 			}
-		})
+		}
+	}
+}
+
+func TestTerminal(t *testing.T) {
+	for _, status := range []Status{StatusSucceeded, StatusFailed, StatusCanceled} {
+		if !status.Terminal() {
+			t.Fatalf("expected %q to be terminal", status)
+		}
+	}
+	for _, status := range []Status{StatusQueued, StatusRunning, Status("unknown")} {
+		if status.Terminal() {
+			t.Fatalf("did not expect %q to be terminal", status)
+		}
 	}
 }
