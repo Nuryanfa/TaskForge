@@ -1,0 +1,24 @@
+# Build output
+/bin/
+/dist/
+*.out
+*.test
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local runtime data
+/data/
+/tmp/
+coverage.out
