@@ -1,2 +1,0 @@
-DROP TABLE IF EXISTS job_attempts;
-DROP TABLE IF EXISTS jobs;

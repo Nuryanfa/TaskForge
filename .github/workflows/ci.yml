@@ -11,6 +11,20 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: taskforge_test
+          POSTGRES_USER: taskforge
+          POSTGRES_PASSWORD: taskforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taskforge -d taskforge_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
 
     steps:
       - name: Check out repository
@@ -22,6 +36,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify modules
+        run: go mod verify
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
@@ -31,11 +51,24 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: PostgreSQL integration tests
+        env:
+          TASKFORGE_TEST_DATABASE_URL: postgres://taskforge:taskforge@127.0.0.1:5432/taskforge_test?sslmode=disable
+        run: go test ./... -run Integration -count=1
+
       - name: Race test
+        env:
+          TASKFORGE_TEST_DATABASE_URL: postgres://taskforge:taskforge@127.0.0.1:5432/taskforge_test?sslmode=disable
         run: go test -race ./...
 
       - name: Build
         run: go build ./...
 
+      - name: Validate Compose
+        run: docker compose config --quiet
+
       - name: Build container
         run: docker build -f deployments/docker/Dockerfile .
+
+      - name: Check generated changes
+        run: git diff --exit-code
