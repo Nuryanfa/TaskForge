@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
@@ -13,50 +13,99 @@ import (
 )
 
 type Store interface {
-	ClaimNextJob(context.Context, string) (job.Job, error)
-	CompleteJob(context.Context, string, int, json.RawMessage) error
-	FailJob(context.Context, string, int, string) error
+	ClaimNextJob(context.Context, string, time.Duration) (job.Claimed, error)
+	RenewLease(context.Context, job.Execution, time.Duration) error
+	CompleteJob(context.Context, job.Execution, json.RawMessage) error
+	FailJob(context.Context, job.Execution, string) error
+	RecoverExpiredJobs(context.Context, int) (int, error)
+}
+
+type Options struct {
+	WorkerID          string
+	Concurrency       int
+	PollInterval      time.Duration
+	ExecutionTimeout  time.Duration
+	ShutdownTimeout   time.Duration
+	LeaseDuration     time.Duration
+	HeartbeatInterval time.Duration
+	RecoveryInterval  time.Duration
+	RecoveryBatchSize int
 }
 
 type Runner struct {
-	store            Store
-	registry         *Registry
-	logger           *slog.Logger
-	workerID         string
-	pollInterval     time.Duration
-	executionTimeout time.Duration
-	shutdownTimeout  time.Duration
+	store    Store
+	registry *Registry
+	logger   *slog.Logger
+	options  Options
 }
 
-func New(store Store, registry *Registry, logger *slog.Logger, workerID string, pollInterval, executionTimeout, shutdownTimeout time.Duration) *Runner {
-	return &Runner{
-		store: store, registry: registry, logger: logger, workerID: workerID,
-		pollInterval: pollInterval, executionTimeout: executionTimeout, shutdownTimeout: shutdownTimeout,
-	}
+func New(store Store, registry *Registry, logger *slog.Logger, options Options) *Runner {
+	return &Runner{store: store, registry: registry, logger: logger, options: options}
 }
 
+// Run starts a fixed-size executor pool and one bounded recovery loop. No job
+// can create more than one handler and one heartbeat goroutine-equivalent loop.
 func (r *Runner) Run(ctx context.Context) error {
+	var wait sync.WaitGroup
+	wait.Add(r.options.Concurrency + 1)
+	for slot := 0; slot < r.options.Concurrency; slot++ {
+		go func() {
+			defer wait.Done()
+			r.runExecutor(ctx)
+		}()
+	}
+	go func() {
+		defer wait.Done()
+		r.runRecovery(ctx)
+	}()
+	wait.Wait()
+	return nil
+}
+
+func (r *Runner) runExecutor(ctx context.Context) {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-timer.C:
 		}
-
-		claimed, err := r.store.ClaimNextJob(ctx, r.workerID)
+		if ctx.Err() != nil {
+			return
+		}
+		claimed, err := r.store.ClaimNextJob(ctx, r.options.WorkerID, r.options.LeaseDuration)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			if !errors.Is(err, postgres.ErrNotFound) {
 				r.logger.Error("worker_claim_failed")
 			}
-			resetTimer(timer, r.pollInterval)
+			resetTimer(timer, r.options.PollInterval)
 			continue
 		}
-		if err := r.execute(ctx, claimed); err != nil {
-			return err
-		}
+		r.execute(ctx, claimed)
 		resetTimer(timer, 0)
+	}
+}
+
+func (r *Runner) runRecovery(ctx context.Context) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		recovered, err := r.store.RecoverExpiredJobs(ctx, r.options.RecoveryBatchSize)
+		if err != nil && ctx.Err() == nil {
+			r.logger.Error("worker_recovery_failed")
+		} else if recovered > 0 {
+			r.logger.Info("worker_jobs_recovered", "count", recovered)
+		}
+		resetTimer(timer, r.options.RecoveryInterval)
 	}
 }
 
@@ -65,54 +114,73 @@ type executionResult struct {
 	errorCode string
 }
 
-func (r *Runner) execute(runCtx context.Context, claimed job.Job) error {
-	executionCtx, cancelExecution := context.WithTimeout(context.Background(), r.executionTimeout)
+func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
+	executionCtx, cancelExecution := context.WithTimeout(context.Background(), r.options.ExecutionTimeout)
 	defer cancelExecution()
 	done := make(chan executionResult, 1)
 	go func() {
-		result, code := r.registry.Execute(executionCtx, claimed.Kind, claimed.Payload)
+		result, code := r.registry.Execute(executionCtx, claimed.Job.Kind, claimed.Job.Payload)
 		done <- executionResult{result: result, errorCode: code}
 	}()
+	heartbeat := time.NewTicker(r.options.HeartbeatInterval)
+	defer heartbeat.Stop()
 
-	select {
-	case outcome := <-done:
-		if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-			outcome = executionResult{errorCode: ErrorExecutionTimeout}
+	var shutdown <-chan time.Time
+	var shutdownTimer *time.Timer
+	defer func() {
+		if shutdownTimer != nil {
+			shutdownTimer.Stop()
 		}
-		return r.persistOutcome(claimed, outcome)
-	case <-executionCtx.Done():
-		return r.persistOutcome(claimed, executionResult{errorCode: ErrorExecutionTimeout})
-	case <-runCtx.Done():
-		shutdownTimer := time.NewTimer(r.shutdownTimeout)
-		defer shutdownTimer.Stop()
+	}()
+	for {
 		select {
 		case outcome := <-done:
 			if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
 				outcome = executionResult{errorCode: ErrorExecutionTimeout}
 			}
-			return r.persistOutcome(claimed, outcome)
+			r.persistOutcome(claimed.Execution, outcome)
+			return
 		case <-executionCtx.Done():
-			return r.persistOutcome(claimed, executionResult{errorCode: ErrorExecutionTimeout})
-		case <-shutdownTimer.C:
+			if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
+				r.persistOutcome(claimed.Execution, executionResult{errorCode: ErrorExecutionTimeout})
+			}
+			return
+		case <-heartbeat.C:
+			hbCtx, cancel := context.WithTimeout(context.Background(), r.options.HeartbeatInterval)
+			err := r.store.RenewLease(hbCtx, claimed.Execution, r.options.LeaseDuration)
+			cancel()
+			if err != nil {
+				cancelExecution()
+				if !errors.Is(err, postgres.ErrOwnershipLost) {
+					r.logger.Error("worker_heartbeat_failed")
+				}
+				return
+			}
+		case <-runCtx.Done():
+			if shutdown == nil {
+				shutdownTimer = time.NewTimer(r.options.ShutdownTimeout)
+				shutdown = shutdownTimer.C
+				runCtx = context.Background()
+			}
+		case <-shutdown:
 			cancelExecution()
-			return r.persistOutcome(claimed, executionResult{errorCode: ErrorShutdownTimeout})
+			return
 		}
 	}
 }
 
-func (r *Runner) persistOutcome(claimed job.Job, outcome executionResult) error {
-	persistCtx, cancel := context.WithTimeout(context.Background(), r.shutdownTimeout)
+func (r *Runner) persistOutcome(execution job.Execution, outcome executionResult) {
+	persistCtx, cancel := context.WithTimeout(context.Background(), r.options.ShutdownTimeout)
 	defer cancel()
 	var err error
 	if outcome.errorCode == "" {
-		err = r.store.CompleteJob(persistCtx, claimed.ID, claimed.AttemptCount, outcome.result)
+		err = r.store.CompleteJob(persistCtx, execution, outcome.result)
 	} else {
-		err = r.store.FailJob(persistCtx, claimed.ID, claimed.AttemptCount, outcome.errorCode)
+		err = r.store.FailJob(persistCtx, execution, outcome.errorCode)
 	}
-	if err != nil {
-		return fmt.Errorf("persist job outcome: %w", err)
+	if err != nil && !errors.Is(err, postgres.ErrOwnershipLost) {
+		r.logger.Error("worker_persist_outcome_failed")
 	}
-	return nil
 }
 
 func resetTimer(timer *time.Timer, duration time.Duration) {

@@ -14,6 +14,9 @@ var environmentKeys = []string{
 	"TASKFORGE_SHUTDOWN_TIMEOUT", "TASKFORGE_WORKER_ID", "TASKFORGE_WORKER_POLL_INTERVAL",
 	"TASKFORGE_JOB_EXECUTION_TIMEOUT", "TASKFORGE_JOB_PAYLOAD_MAX_BYTES",
 	"TASKFORGE_JOB_RESULT_MAX_BYTES",
+	"TASKFORGE_WORKER_CONCURRENCY", "TASKFORGE_JOB_LEASE_DURATION",
+	"TASKFORGE_JOB_HEARTBEAT_INTERVAL", "TASKFORGE_RECOVERY_INTERVAL",
+	"TASKFORGE_RECOVERY_BATCH_SIZE",
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -32,6 +35,11 @@ func TestLoadDefaults(t *testing.T) {
 		cfg.JobExecutionTimeout != 30*time.Second {
 		t.Fatalf("unexpected duration defaults: %+v", cfg)
 	}
+	if cfg.WorkerConcurrency != 4 || cfg.JobLeaseDuration != 30*time.Second ||
+		cfg.JobHeartbeatInterval != 10*time.Second || cfg.RecoveryInterval != 5*time.Second ||
+		cfg.RecoveryBatchSize != 100 {
+		t.Fatalf("unexpected worker defaults: %+v", cfg)
+	}
 	if cfg.JobPayloadMaxBytes != 64*1024 || cfg.JobResultMaxBytes != 64*1024 {
 		t.Fatalf("unexpected size defaults: %+v", cfg)
 	}
@@ -48,6 +56,9 @@ func TestLoadValidOverrides(t *testing.T) {
 		"TASKFORGE_SHUTDOWN_TIMEOUT": "7s", "TASKFORGE_WORKER_ID": "worker-01",
 		"TASKFORGE_WORKER_POLL_INTERVAL": "250ms", "TASKFORGE_JOB_EXECUTION_TIMEOUT": "8s",
 		"TASKFORGE_JOB_PAYLOAD_MAX_BYTES": "2048", "TASKFORGE_JOB_RESULT_MAX_BYTES": "4096",
+		"TASKFORGE_WORKER_CONCURRENCY": "8", "TASKFORGE_JOB_LEASE_DURATION": "12s",
+		"TASKFORGE_JOB_HEARTBEAT_INTERVAL": "3s", "TASKFORGE_RECOVERY_INTERVAL": "4s",
+		"TASKFORGE_RECOVERY_BATCH_SIZE": "25",
 	}
 	for key, value := range values {
 		t.Setenv(key, value)
@@ -62,6 +73,11 @@ func TestLoadValidOverrides(t *testing.T) {
 		cfg.WorkerPollInterval != 250*time.Millisecond || cfg.JobExecutionTimeout != 8*time.Second {
 		t.Fatalf("unexpected overrides: %+v", cfg)
 	}
+	if cfg.WorkerConcurrency != 8 || cfg.JobLeaseDuration != 12*time.Second ||
+		cfg.JobHeartbeatInterval != 3*time.Second || cfg.RecoveryInterval != 4*time.Second ||
+		cfg.RecoveryBatchSize != 25 {
+		t.Fatalf("unexpected worker overrides: %+v", cfg)
+	}
 }
 
 func TestLoadRejectsInvalidDurations(t *testing.T) {
@@ -70,6 +86,8 @@ func TestLoadRejectsInvalidDurations(t *testing.T) {
 		"TASKFORGE_READ_TIMEOUT", "TASKFORGE_READ_HEADER_TIMEOUT", "TASKFORGE_WRITE_TIMEOUT",
 		"TASKFORGE_IDLE_TIMEOUT", "TASKFORGE_SHUTDOWN_TIMEOUT",
 		"TASKFORGE_WORKER_POLL_INTERVAL", "TASKFORGE_JOB_EXECUTION_TIMEOUT",
+		"TASKFORGE_JOB_LEASE_DURATION", "TASKFORGE_JOB_HEARTBEAT_INTERVAL",
+		"TASKFORGE_RECOVERY_INTERVAL",
 	}
 	for _, key := range keys {
 		for _, value := range []string{"bad", "0s", "-1s", "31m"} {
@@ -92,6 +110,10 @@ func TestLoadRejectsInvalidCountsAndSizes(t *testing.T) {
 		{key: "TASKFORGE_DATABASE_MIN_CONNS", value: "-1"},
 		{key: "TASKFORGE_JOB_PAYLOAD_MAX_BYTES", value: "0"},
 		{key: "TASKFORGE_JOB_RESULT_MAX_BYTES", value: "1048577"},
+		{key: "TASKFORGE_WORKER_CONCURRENCY", value: "0"},
+		{key: "TASKFORGE_WORKER_CONCURRENCY", value: "65"},
+		{key: "TASKFORGE_RECOVERY_BATCH_SIZE", value: "0"},
+		{key: "TASKFORGE_RECOVERY_BATCH_SIZE", value: "1001"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
@@ -107,6 +129,24 @@ func TestLoadRejectsInvalidCountsAndSizes(t *testing.T) {
 	t.Setenv("TASKFORGE_DATABASE_MAX_CONNS", "4")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected min/max relationship error")
+	}
+	clearEnvironment(t)
+	t.Setenv("TASKFORGE_JOB_LEASE_DURATION", "2s")
+	t.Setenv("TASKFORGE_JOB_HEARTBEAT_INTERVAL", "2s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected heartbeat/lease relationship error")
+	}
+	for _, key := range []string{"TASKFORGE_JOB_HEARTBEAT_INTERVAL", "TASKFORGE_RECOVERY_INTERVAL"} {
+		clearEnvironment(t)
+		t.Setenv(key, "50ms")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("expected minimum-duration error for %s, got %v", key, err)
+		}
+	}
+	clearEnvironment(t)
+	t.Setenv("TASKFORGE_JOB_LEASE_DURATION", "999ms")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TASKFORGE_JOB_LEASE_DURATION") {
+		t.Fatalf("expected minimum lease error, got %v", err)
 	}
 }
 

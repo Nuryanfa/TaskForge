@@ -3,8 +3,8 @@
 ## Problem
 
 Applications need durable asynchronous work without hiding failure behavior.
-TaskForge v0.1 proves the PostgreSQL persistence, claiming, API, and sequential
-execution model before adding distributed workers.
+TaskForge v0.2 adds safely concurrent, leased execution to the PostgreSQL
+foundation while keeping ownership and failure behavior explicit.
 
 ## Product principles
 
@@ -14,14 +14,17 @@ execution model before adding distributed workers.
 4. Correctness-sensitive SQL is explicit and tested against real PostgreSQL.
 5. Payloads, results, idempotency keys, and database credentials are sensitive.
 
-## Implemented v0.1 scope
+## Implemented through v0.2
 
 - Embedded, versioned PostgreSQL migrations and a dedicated migration command.
 - Bounded `pgxpool` connection pooling and database operations.
 - Submit, inspect, and queued-job cancellation HTTP endpoints.
 - Queue-scoped creation idempotency using a canonical SHA-256 fingerprint.
-- One sequential worker with a transactional queued-to-running claim.
-- Persisted attempts and success/failure outcomes.
+- A fixed, bounded executor pool and transactional queued-to-running claims.
+- Time-bounded leases, periodic heartbeat renewal, and monotonically increasing
+  fencing tokens.
+- Bounded expired-lease recovery with abandoned-attempt history.
+- Persisted attempts and success/failure/abandoned outcomes.
 - A bounded, built-in `demo.echo` handler registry.
 - Process liveness and bounded database-aware readiness.
 - Graceful API and worker shutdown.
@@ -42,28 +45,34 @@ Public job responses omit payloads and idempotency keys. `/healthz` reports only
 process liveness. `/readyz` performs a short, bounded PostgreSQL ping. HTTP
 errors use stable public codes without raw dependency details.
 
-## v0.1 state and claim semantics
+## State, ownership, and claim semantics
 
 Supported states are `queued`, `running`, `succeeded`, `failed`, and
 `canceled`. A claim transaction locks one eligible queued row with
 `FOR UPDATE SKIP LOCKED`, changes it to running, increments its attempt number,
-and inserts the attempt before commit. Success and failure conditionally update
-the matching running job and attempt in one transaction.
+and fencing token, assigns a PostgreSQL-clock lease, and inserts the attempt
+before commit. Heartbeat, success, and failure require the current owner and
+fencing token. Outcome and attempt finalization are one transaction.
+
+An expired running job is locked by one recovery process, its current attempt
+is marked `abandoned`, and it returns to `queued` without decrementing its
+attempt count. A future claim receives a higher fencing token. Recovery is not
+an automatic retry policy and adds no backoff or dead-letter behavior.
 
 Submission idempotency is not execution-side idempotency. A caller can safely
 replay creation with the same queue/key and normalized immutable fields, but
 TaskForge does not guarantee that external handler side effects happen once.
 
-## Exclusions and failure limitation
+## Delivery semantics and exclusions
 
-v0.1 excludes concurrent worker goroutines, leases, heartbeat or renewal,
-fencing tokens, expired-lease recovery, automatic worker-crash recovery, retry
-scheduling, dead-letter queues, NATS, cron scheduling, workflow DAGs, saga
-compensation, gRPC, telemetry platforms, Kubernetes, and a web dashboard.
+TaskForge provides at-least-once execution. A worker can perform an external
+side effect and crash before persisting success; lease recovery may then run
+the handler again. Fencing protects TaskForge's PostgreSQL state only. Handler
+integrations need idempotency keys or downstream fencing for their own effects.
 
-The deployment must run at most one active sequential worker. If that process
-dies while executing a job, the job remains `running`; automated recovery is
-intentionally deferred to v0.2.
+v0.2 excludes automatic retry policy, retry backoff, maximum-attempt and
+dead-letter handling, delayed or recurring jobs, NATS, workflow DAGs,
+authentication or multitenancy, Kubernetes, and full observability.
 
 ## Acceptance criteria
 
@@ -74,7 +83,12 @@ intentionally deferred to v0.2.
 - Claim transition and attempt insertion are atomic.
 - Only queued jobs can be canceled.
 - Completion/failure and attempt finalization are atomic and duplicate-safe.
-- The worker executes no more than one job at a time.
+- Each process never exceeds its configured worker concurrency.
+- Multiple workers cannot actively own the same job.
+- Heartbeats extend only a current, unexpired lease.
+- Stale fencing tokens cannot heartbeat, complete, or fail a newer execution.
+- Expired attempts are abandoned and jobs become claimable with a higher token.
+- Concurrent recovery processes recover an expired ownership epoch once.
 - All external operations and shutdown waits are bounded.
 - Integration tests use real PostgreSQL with isolated schemas.
 - Credentials, payloads, results, and idempotency keys do not appear in logs.
@@ -84,7 +98,7 @@ intentionally deferred to v0.2.
 | Version | Scope |
 | --- | --- |
 | v0.1 | Durable PostgreSQL API, migrations, and sequential worker |
-| v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery |
+| v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery (implemented) |
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue |
 | v0.4 | Delayed and recurring scheduling |
 | v0.5 | Transactional outbox and NATS JetStream |

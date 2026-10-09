@@ -52,6 +52,11 @@ services:
     environment:
       TASKFORGE_DATABASE_URL: postgres://taskforge:taskforge@postgres:5432/taskforge?sslmode=disable
       TASKFORGE_WORKER_ID: compose-worker-1
+      TASKFORGE_WORKER_CONCURRENCY: ${TASKFORGE_WORKER_CONCURRENCY:-4}
+      TASKFORGE_JOB_LEASE_DURATION: ${TASKFORGE_JOB_LEASE_DURATION:-30s}
+      TASKFORGE_JOB_HEARTBEAT_INTERVAL: ${TASKFORGE_JOB_HEARTBEAT_INTERVAL:-10s}
+      TASKFORGE_RECOVERY_INTERVAL: ${TASKFORGE_RECOVERY_INTERVAL:-5s}
+      TASKFORGE_RECOVERY_BATCH_SIZE: ${TASKFORGE_RECOVERY_BATCH_SIZE:-100}
     depends_on:
       migrate:
         condition: service_completed_successfully
