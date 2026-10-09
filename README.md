@@ -1,19 +1,20 @@
 # TaskForge
 
-TaskForge v0.2 is a durable PostgreSQL-backed background job platform written
-in Go. It provides idempotent submission, bounded concurrent execution,
-time-bounded leases, fencing, heartbeat renewal, and worker-crash recovery.
+TaskForge v0.3 is a durable PostgreSQL-backed background job platform written
+in Go. It provides bounded leased execution, retry scheduling with deterministic
+jitter, stable execution idempotency keys, and a PostgreSQL dead-letter queue.
 
 > TaskForge is an educational portfolio project. It is not production ready,
 > does not promise exactly-once execution, and must not be exposed directly to
 > an untrusted public network.
 
-## v0.2 architecture
+## v0.3 architecture
 
 ```mermaid
 flowchart LR
     Client["Client"] --> API["taskforge-api"]
     API --> DB[("PostgreSQL")]
+    API -->|"inspect + redrive DLQ"| DB
     Migrator["taskforge-migrate"] --> DB
     Worker -->|"claim + lease<br/>heartbeat + fenced outcome<br/>expired-lease recovery"| DB
 ```
@@ -33,6 +34,8 @@ stateDiagram-v2
     Running --> Succeeded
     Running --> Failed
     Running --> Queued: lease expired / attempt abandoned
+    Running --> Queued: retryable failure / backoff
+    Failed --> Queued: redrive creates new linked job
 ```
 
 `succeeded`, `failed`, and `canceled` are terminal. The queued-to-running claim
@@ -109,6 +112,14 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/jobs/<job-id>
 Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/jobs/<job-id>/cancel
 ```
 
+Inspect and redrive dead-lettered work without exposing payloads:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8080/v1/dead-letters?limit=25"
+Invoke-RestMethod http://127.0.0.1:8080/v1/dead-letters/<job-id>
+Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/dead-letters/<job-id>/redrive
+```
+
 GET responses exclude payloads and idempotency keys. Result metadata reports
 only whether a bounded result exists and its byte count. Errors use a stable
 JSON envelope with a machine code and request ID; raw PostgreSQL errors are not
@@ -124,9 +135,10 @@ Idempotency applies only to job creation and is scoped by queue:
   existing job (`200`).
 - Reusing the key with different immutable fields returns `409`.
 
-The fingerprint is SHA-256 over a deterministic JSON representation. This does
-not make handler side effects idempotent; execution-side idempotency is future
-work.
+The fingerprint is SHA-256 over a deterministic JSON representation. This is
+separate from the execution key propagated to handlers; neither mechanism can
+make an external side effect idempotent unless the downstream system enforces
+the corresponding key.
 
 ## Worker behavior and failure semantics
 
@@ -148,6 +160,18 @@ heartbeats while active handlers receive a bounded drain window, then cancels
 remaining local work. A hard crash cannot drain; recovery begins only after
 the lease expires. The built-in registry still supports only bounded
 `demo.echo` and never executes arbitrary user code.
+
+Typed failures distinguish retryable conditions (including execution timeout
+and expired leases) from permanent failures such as invalid payloads or unknown
+job kinds. Retry policy is snapshotted when a job is created. Exponential
+backoff is capped and uses deterministic bounded jitter; PostgreSQL `NOW()`
+sets the next `available_at`. Exhausted and permanent failures atomically enter
+the DLQ without copying payloads.
+
+Submission idempotency deduplicates API creation requests. The separate
+execution idempotency key is stable across attempts and redrive and is passed
+to handlers. TaskForge only propagates this key: downstream systems must enforce
+it to make their side effects idempotent.
 
 ## Validation
 
@@ -177,16 +201,16 @@ CI supplies a real PostgreSQL service and runs the suite with the race detector.
 
 ## Security limitations
 
-v0.2 has no authentication, authorization, TLS termination, multi-tenancy, or
+v0.3 has no authentication, authorization, TLS termination, multi-tenancy, or
 rate limiting. Bind it to loopback or a trusted development network only. Job
 payloads and results are potentially sensitive; the public GET API deliberately
 does not expose them. See [SECURITY.md](SECURITY.md).
 
-## Known v0.2 limitations
+## Known v0.3 limitations
 
 - Delivery is at least once; PostgreSQL fencing cannot fence external systems.
-- There is no automatic retry policy, backoff, maximum-attempt policy, or
-  dead-letter queue. Lease recovery only returns abandoned work to `queued`.
+- Retry is bounded but still at least once; redrive can execute logical work
+  again and external systems must enforce execution idempotency.
 - No delayed/cron scheduling, NATS, gRPC,
   workflows, Kubernetes, web UI, Prometheus, or OpenTelemetry.
 - Submission idempotency does not guarantee idempotent execution side effects.
@@ -197,7 +221,7 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | --- | --- | --- |
 | v0.1 | Durable PostgreSQL API, migrations, and sequential worker | Implemented |
 | v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery | Implemented |
-| v0.3 | Retry scheduling, execution idempotency, and dead-letter queue | Planned |
+| v0.3 | Retry scheduling, execution idempotency, and dead-letter queue | Implemented |
 | v0.4 | Delayed and recurring scheduling | Planned |
 | v0.5 | Transactional outbox and NATS JetStream | Planned |
 | v0.6 | Workflow DAGs and saga compensation | Planned |

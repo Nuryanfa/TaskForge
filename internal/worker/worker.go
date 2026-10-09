@@ -16,7 +16,7 @@ type Store interface {
 	ClaimNextJob(context.Context, string, time.Duration) (job.Claimed, error)
 	RenewLease(context.Context, job.Execution, time.Duration) error
 	CompleteJob(context.Context, job.Execution, json.RawMessage) error
-	FailJob(context.Context, job.Execution, string) error
+	FailJob(context.Context, job.Execution, job.Failure) error
 	RecoverExpiredJobs(context.Context, int) (int, error)
 }
 
@@ -110,8 +110,8 @@ func (r *Runner) runRecovery(ctx context.Context) {
 }
 
 type executionResult struct {
-	result    json.RawMessage
-	errorCode string
+	result  json.RawMessage
+	failure *job.Failure
 }
 
 func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
@@ -119,8 +119,8 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 	defer cancelExecution()
 	done := make(chan executionResult, 1)
 	go func() {
-		result, code := r.registry.Execute(executionCtx, claimed.Job.Kind, claimed.Job.Payload)
-		done <- executionResult{result: result, errorCode: code}
+		result, failure := r.registry.Execute(executionCtx, claimed.Execution, claimed.Job.Kind, claimed.Job.Payload)
+		done <- executionResult{result: result, failure: failure}
 	}()
 	heartbeat := time.NewTicker(r.options.HeartbeatInterval)
 	defer heartbeat.Stop()
@@ -136,13 +136,13 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 		select {
 		case outcome := <-done:
 			if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-				outcome = executionResult{errorCode: ErrorExecutionTimeout}
+				outcome = executionResult{failure: &job.Failure{Code: ErrorExecutionTimeout, Retryable: true}}
 			}
 			r.persistOutcome(claimed.Execution, outcome)
 			return
 		case <-executionCtx.Done():
 			if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-				r.persistOutcome(claimed.Execution, executionResult{errorCode: ErrorExecutionTimeout})
+				r.persistOutcome(claimed.Execution, executionResult{failure: &job.Failure{Code: ErrorExecutionTimeout, Retryable: true}})
 			}
 			return
 		case <-heartbeat.C:
@@ -173,10 +173,10 @@ func (r *Runner) persistOutcome(execution job.Execution, outcome executionResult
 	persistCtx, cancel := context.WithTimeout(context.Background(), r.options.ShutdownTimeout)
 	defer cancel()
 	var err error
-	if outcome.errorCode == "" {
+	if outcome.failure == nil {
 		err = r.store.CompleteJob(persistCtx, execution, outcome.result)
 	} else {
-		err = r.store.FailJob(persistCtx, execution, outcome.errorCode)
+		err = r.store.FailJob(persistCtx, execution, *outcome.failure)
 	}
 	if err != nil && !errors.Is(err, postgres.ErrOwnershipLost) {
 		r.logger.Error("worker_persist_outcome_failed")

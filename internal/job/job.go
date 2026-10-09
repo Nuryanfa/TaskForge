@@ -40,6 +40,12 @@ type Job struct {
 	LeaseOwner     *string
 	LeaseExpiresAt *time.Time
 	FencingToken   int64
+	ExecutionKey   string
+	MaxAttempts    int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	JitterPercent  int
+	DeadLetteredAt *time.Time
 }
 
 // Execution identifies one ownership epoch. Its values must accompany every
@@ -49,6 +55,23 @@ type Execution struct {
 	Attempt      int
 	WorkerID     string
 	FencingToken int64
+	ExecutionKey string
+}
+
+type Failure struct {
+	Code      string
+	Retryable bool
+}
+
+type DeadLetter struct {
+	JobID          string
+	Queue          string
+	Kind           string
+	FinalAttempt   int
+	ErrorCode      string
+	DeadLetteredAt time.Time
+	RedrivenJobID  *string
+	RedrivenAt     *time.Time
 }
 
 type Claimed struct {

@@ -2,12 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,12 +23,16 @@ type Store interface {
 	GetJob(context.Context, string) (job.Job, error)
 	CancelQueuedJob(context.Context, string) (job.Job, error)
 	Ping(context.Context) error
+	ListDeadLetters(context.Context, *time.Time, string, int) ([]job.DeadLetter, bool, error)
+	GetDeadLetter(context.Context, string) (job.DeadLetter, error)
+	RedriveDeadLetter(context.Context, string) (job.Job, bool, error)
 }
 
 type API struct {
-	store            Store
-	payloadMaxBytes  int64
-	readinessTimeout time.Duration
+	store              Store
+	payloadMaxBytes    int64
+	readinessTimeout   time.Duration
+	deadLetterPageSize int
 }
 
 type errorEnvelope struct {
@@ -54,6 +60,8 @@ type jobResponse struct {
 	LastErrorCode *string    `json:"last_error_code,omitempty"`
 	HasResult     bool       `json:"has_result"`
 	ResultBytes   int        `json:"result_bytes,omitempty"`
+	MaxAttempts   int        `json:"max_attempts"`
+	DeadLettered  bool       `json:"dead_lettered"`
 }
 
 type submitRequest struct {
@@ -66,19 +74,29 @@ type submitRequest struct {
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration) http.Handler {
-	api := &API{store: store, payloadMaxBytes: payloadMaxBytes, readinessTimeout: readinessTimeout}
+func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration, pageSizes ...int) http.Handler {
+	pageSize := 50
+	if len(pageSizes) > 0 {
+		pageSize = pageSizes[0]
+	}
+	api := &API{store: store, payloadMaxBytes: payloadMaxBytes, readinessTimeout: readinessTimeout, deadLetterPageSize: pageSize}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("GET /readyz", api.ready)
 	mux.HandleFunc("POST /v1/jobs", api.submit)
 	mux.HandleFunc("GET /v1/jobs/{id}", api.get)
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", api.cancel)
+	mux.HandleFunc("GET /v1/dead-letters", api.listDeadLetters)
+	mux.HandleFunc("GET /v1/dead-letters/{id}", api.getDeadLetter)
+	mux.HandleFunc("POST /v1/dead-letters/{id}/redrive", api.redriveDeadLetter)
 	mux.HandleFunc("/healthz", api.methodNotAllowed)
 	mux.HandleFunc("/readyz", api.methodNotAllowed)
 	mux.HandleFunc("/v1/jobs", api.methodNotAllowed)
 	mux.HandleFunc("/v1/jobs/{id}", api.methodNotAllowed)
 	mux.HandleFunc("/v1/jobs/{id}/cancel", api.methodNotAllowed)
+	mux.HandleFunc("/v1/dead-letters", api.methodNotAllowed)
+	mux.HandleFunc("/v1/dead-letters/{id}", api.methodNotAllowed)
+	mux.HandleFunc("/v1/dead-letters/{id}/redrive", api.methodNotAllowed)
 	mux.HandleFunc("/", api.notFound)
 	return api.withRequestID(mux)
 }
@@ -180,6 +198,120 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, responseForJob(canceled))
 }
 
+type deadLetterResponse struct {
+	JobID          string     `json:"job_id"`
+	Queue          string     `json:"queue"`
+	Kind           string     `json:"kind"`
+	FinalAttempt   int        `json:"final_attempt"`
+	ErrorCode      string     `json:"error_code"`
+	DeadLetteredAt time.Time  `json:"dead_lettered_at"`
+	RedrivenJobID  *string    `json:"redriven_job_id,omitempty"`
+	RedrivenAt     *time.Time `json:"redriven_at,omitempty"`
+}
+
+type deadLetterPage struct {
+	Items      []deadLetterResponse `json:"items"`
+	NextCursor string               `json:"next_cursor,omitempty"`
+}
+
+type pageCursor struct {
+	At time.Time `json:"at"`
+	ID string    `json:"id"`
+}
+
+func (a *API) listDeadLetters(w http.ResponseWriter, r *http.Request) {
+	for key := range r.URL.Query() {
+		if key != "limit" && key != "cursor" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "only limit and cursor are supported")
+			return
+		}
+		if len(r.URL.Query()[key]) != 1 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "query parameters must not be repeated")
+			return
+		}
+	}
+	limit := a.deadLetterPageSize
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > a.deadLetterPageSize {
+			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "limit is outside the allowed range")
+			return
+		}
+		limit = value
+	}
+	var before *time.Time
+	beforeID := ""
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		var cursor pageCursor
+		if err != nil || json.Unmarshal(decoded, &cursor) != nil || cursor.At.IsZero() {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid")
+			return
+		}
+		if _, err := uuid.Parse(cursor.ID); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid")
+			return
+		}
+		before = &cursor.At
+		beforeID = cursor.ID
+	}
+	items, more, err := a.store.ListDeadLetters(r.Context(), before, beforeID, limit)
+	if err != nil {
+		a.writeStoreError(w, r, err)
+		return
+	}
+	response := deadLetterPage{Items: make([]deadLetterResponse, 0, len(items))}
+	for _, item := range items {
+		response.Items = append(response.Items, deadLetterForResponse(item))
+	}
+	if more && len(items) > 0 {
+		last := items[len(items)-1]
+		encoded, _ := json.Marshal(pageCursor{At: last.DeadLetteredAt, ID: last.JobID})
+		response.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *API) getDeadLetter(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JOB_ID", "job ID must be a valid UUID")
+		return
+	}
+	item, err := a.store.GetDeadLetter(r.Context(), id)
+	if err != nil {
+		a.writeStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, deadLetterForResponse(item))
+}
+
+func (a *API) redriveDeadLetter(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JOB_ID", "job ID must be a valid UUID")
+		return
+	}
+	created, isNew, err := a.store.RedriveDeadLetter(r.Context(), id)
+	if err != nil {
+		a.writeStoreError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if isNew {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, responseForJob(created))
+}
+
+func deadLetterForResponse(v job.DeadLetter) deadLetterResponse {
+	return deadLetterResponse{
+		JobID: v.JobID, Queue: v.Queue, Kind: v.Kind, FinalAttempt: v.FinalAttempt,
+		ErrorCode: v.ErrorCode, DeadLetteredAt: v.DeadLetteredAt,
+		RedrivenJobID: v.RedrivenJobID, RedrivenAt: v.RedrivenAt,
+	}
+}
+
 func (a *API) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, postgres.ErrNotFound):
@@ -238,6 +370,7 @@ func responseForJob(value job.Job) jobResponse {
 		AvailableAt: value.AvailableAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 		StartedAt: value.StartedAt, CompletedAt: value.CompletedAt,
 		LastErrorCode: value.LastErrorCode, HasResult: len(value.Result) > 0, ResultBytes: len(value.Result),
+		MaxAttempts: value.MaxAttempts, DeadLettered: value.DeadLetteredAt != nil,
 	}
 }
 

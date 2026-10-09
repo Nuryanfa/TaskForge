@@ -3,10 +3,10 @@
 ## Product
 
 TaskForge is an educational, production-like durable job platform written in
-Go. v0.2 adds a bounded concurrent worker model with lease-based crash
-recovery while PostgreSQL remains the durable coordination authority.
+Go. v0.3 adds bounded retry and dead-letter handling to the leased concurrent
+worker model while PostgreSQL remains the durable coordination authority.
 
-## Current implemented state (v0.2)
+## Current implemented state (v0.3)
 
 - Commands: `taskforge-api`, `taskforge-worker`, and `taskforge-migrate`.
 - PostgreSQL access uses bounded `pgxpool` connections and explicit SQL.
@@ -21,6 +21,11 @@ recovery while PostgreSQL remains the durable coordination authority.
   lock-safe batches and their attempts are marked `abandoned`.
 - Attempts and bounded success/failure/abandoned outcomes are persisted
   transactionally.
+- Retryable attempts return to `queued` with policy-snapshotted exponential
+  backoff and deterministic jitter; permanent or exhausted jobs enter the DLQ.
+- Execution keys remain stable across attempts and linked redrives.
+- Dead letters contain operational metadata only and support cursor-based
+  inspection and idempotent transactional redrive.
 - Compose orders PostgreSQL, migration completion, then API and worker startup.
 - CI runs unit, integration, race, build, Compose, and image validation.
 

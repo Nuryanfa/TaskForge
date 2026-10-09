@@ -44,7 +44,7 @@ func (s *workerStore) CompleteJob(_ context.Context, _ job.Execution, _ json.Raw
 	s.completed++
 	return nil
 }
-func (s *workerStore) FailJob(_ context.Context, _ job.Execution, _ string) error {
+func (s *workerStore) FailJob(_ context.Context, _ job.Execution, _ job.Failure) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failed++
@@ -67,7 +67,7 @@ func TestRunnerNeverExceedsConfiguredConcurrency(t *testing.T) {
 	store := &workerStore{jobs: jobs}
 	var mu sync.Mutex
 	active, maximum := 0, 0
-	registry := newRegistry(map[string]Handler{"test": HandlerFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+	registry := newRegistry(map[string]Handler{"test": HandlerFunc(func(context.Context, job.Execution, json.RawMessage) (json.RawMessage, *job.Failure) {
 		mu.Lock()
 		active++
 		if active > maximum {
@@ -94,10 +94,10 @@ func TestRunnerNeverExceedsConfiguredConcurrency(t *testing.T) {
 func TestRunnerGracefulShutdownIsBoundedAndStopsClaims(t *testing.T) {
 	store := &workerStore{jobs: []job.Job{{ID: "one", Kind: "test", AttemptCount: 1, FencingToken: 1}}}
 	started := make(chan struct{})
-	registry := newRegistry(map[string]Handler{"test": HandlerFunc(func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	registry := newRegistry(map[string]Handler{"test": HandlerFunc(func(ctx context.Context, _ job.Execution, _ json.RawMessage) (json.RawMessage, *job.Failure) {
 		close(started)
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return nil, &job.Failure{Code: ErrorShutdownTimeout, Retryable: true}
 	})})
 	options := testOptions()
 	options.Concurrency = 1
