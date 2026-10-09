@@ -192,7 +192,7 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.8 | High availability, Kubernetes, load, and chaos testing | Planned |
 
 See the [product requirements](docs/PRD.md),
-[project memory](docs/PROJECT_MEMORY.md), and [architecture decisions](docs/adr).
+[current architecture](docs/CURRENT_STATE.md), and [architecture decisions](docs/adr).
 
 ## License
 

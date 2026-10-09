@@ -1,4 +1,4 @@
-# TaskForge project memory
+# TaskForge Current Architecture
 
 ## Product
 
@@ -6,7 +6,7 @@ TaskForge is an educational, production-like durable job platform written in
 Go. v0.1 is the PostgreSQL foundation for the distributed worker model planned
 for v0.2; v0.1 itself must not be described as distributed execution.
 
-## Current implemented state
+## v0.1 implemented state
 
 - Commands: `taskforge-api`, `taskforge-worker`, and `taskforge-migrate`.
 - PostgreSQL access uses bounded `pgxpool` connections and explicit SQL.
@@ -20,7 +20,7 @@ for v0.2; v0.1 itself must not be described as distributed execution.
 - Compose orders PostgreSQL, migration completion, then API and worker startup.
 - CI runs unit, integration, race, build, Compose, and image validation.
 
-## Stable decisions
+## Architecture decisions
 
 - Go module: `github.com/Nuryanfa/TaskForge`.
 - PostgreSQL is the only durable source of truth.
