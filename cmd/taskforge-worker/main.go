@@ -29,10 +29,15 @@ func main() {
 	defer store.Close()
 
 	runner := worker.New(
-		store, worker.NewRegistry(cfg.JobResultMaxBytes), logger, cfg.WorkerID,
-		cfg.WorkerPollInterval, cfg.JobExecutionTimeout, cfg.ShutdownTimeout,
+		store, worker.NewRegistry(cfg.JobResultMaxBytes), logger, worker.Options{
+			WorkerID: cfg.WorkerID, Concurrency: cfg.WorkerConcurrency,
+			PollInterval: cfg.WorkerPollInterval, ExecutionTimeout: cfg.JobExecutionTimeout,
+			ShutdownTimeout: cfg.ShutdownTimeout, LeaseDuration: cfg.JobLeaseDuration,
+			HeartbeatInterval: cfg.JobHeartbeatInterval, RecoveryInterval: cfg.RecoveryInterval,
+			RecoveryBatchSize: cfg.RecoveryBatchSize,
+		},
 	)
-	logger.Info("worker_started", "worker_id", cfg.WorkerID)
+	logger.Info("worker_started", "worker_id", cfg.WorkerID, "concurrency", cfg.WorkerConcurrency)
 	if err := runner.Run(ctx); err != nil {
 		logger.Error("worker_failed")
 		os.Exit(1)

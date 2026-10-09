@@ -37,6 +37,23 @@ type Job struct {
 	UpdatedAt      time.Time
 	StartedAt      *time.Time
 	CompletedAt    *time.Time
+	LeaseOwner     *string
+	LeaseExpiresAt *time.Time
+	FencingToken   int64
+}
+
+// Execution identifies one ownership epoch. Its values must accompany every
+// mutation so an execution that lost its lease cannot alter newer work.
+type Execution struct {
+	JobID        string
+	Attempt      int
+	WorkerID     string
+	FencingToken int64
+}
+
+type Claimed struct {
+	Job       Job
+	Execution Execution
 }
 
 type Submission struct {

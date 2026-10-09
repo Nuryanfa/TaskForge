@@ -24,13 +24,23 @@ const (
 	defaultIdleTimeout                  = 60 * time.Second
 	defaultShutdownTimeout              = 10 * time.Second
 	defaultWorkerPollInterval           = 500 * time.Millisecond
+	defaultWorkerConcurrency            = 4
 	defaultJobExecutionTimeout          = 30 * time.Second
+	defaultJobLeaseDuration             = 30 * time.Second
+	defaultJobHeartbeatInterval         = 10 * time.Second
+	defaultRecoveryInterval             = 5 * time.Second
+	defaultRecoveryBatchSize            = 100
 	defaultJobPayloadMaxBytes           = 64 * 1024
 	defaultJobResultMaxBytes            = 64 * 1024
 	maximumConnectionCount              = 100
 	maximumNetworkTimeout               = 5 * time.Minute
 	maximumJobExecutionTimeout          = 30 * time.Minute
 	maximumWorkerPollInterval           = time.Minute
+	minimumLeaseDuration                = time.Second
+	maximumLeaseDuration                = 10 * time.Minute
+	minimumWorkerInterval               = 100 * time.Millisecond
+	maximumWorkerConcurrency            = 64
+	maximumRecoveryBatchSize            = 1000
 	maximumJobDataBytes           int64 = 1024 * 1024
 )
 
@@ -50,7 +60,12 @@ type Config struct {
 	ShutdownTimeout        time.Duration
 	WorkerID               string
 	WorkerPollInterval     time.Duration
+	WorkerConcurrency      int
 	JobExecutionTimeout    time.Duration
+	JobLeaseDuration       time.Duration
+	JobHeartbeatInterval   time.Duration
+	RecoveryInterval       time.Duration
+	RecoveryBatchSize      int
 	JobPayloadMaxBytes     int64
 	JobResultMaxBytes      int64
 }
@@ -70,7 +85,12 @@ func Load() (Config, error) {
 		ShutdownTimeout:        defaultShutdownTimeout,
 		WorkerID:               os.Getenv("TASKFORGE_WORKER_ID"),
 		WorkerPollInterval:     defaultWorkerPollInterval,
+		WorkerConcurrency:      defaultWorkerConcurrency,
 		JobExecutionTimeout:    defaultJobExecutionTimeout,
+		JobLeaseDuration:       defaultJobLeaseDuration,
+		JobHeartbeatInterval:   defaultJobHeartbeatInterval,
+		RecoveryInterval:       defaultRecoveryInterval,
+		RecoveryBatchSize:      defaultRecoveryBatchSize,
 		JobPayloadMaxBytes:     defaultJobPayloadMaxBytes,
 		JobResultMaxBytes:      defaultJobResultMaxBytes,
 	}
@@ -92,6 +112,9 @@ func Load() (Config, error) {
 		{key: "TASKFORGE_SHUTDOWN_TIMEOUT", target: &cfg.ShutdownTimeout, maximum: maximumNetworkTimeout},
 		{key: "TASKFORGE_WORKER_POLL_INTERVAL", target: &cfg.WorkerPollInterval, maximum: maximumWorkerPollInterval},
 		{key: "TASKFORGE_JOB_EXECUTION_TIMEOUT", target: &cfg.JobExecutionTimeout, maximum: maximumJobExecutionTimeout},
+		{key: "TASKFORGE_JOB_LEASE_DURATION", target: &cfg.JobLeaseDuration, maximum: maximumLeaseDuration},
+		{key: "TASKFORGE_JOB_HEARTBEAT_INTERVAL", target: &cfg.JobHeartbeatInterval, maximum: maximumLeaseDuration},
+		{key: "TASKFORGE_RECOVERY_INTERVAL", target: &cfg.RecoveryInterval, maximum: maximumNetworkTimeout},
 	}
 	for _, duration := range durations {
 		value, err := durationFromEnv(duration.key, *duration.target, duration.maximum)
@@ -99,6 +122,18 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		*duration.target = value
+	}
+	if cfg.JobLeaseDuration < minimumLeaseDuration {
+		return Config{}, fmt.Errorf("TASKFORGE_JOB_LEASE_DURATION must be at least %s", minimumLeaseDuration)
+	}
+	if cfg.JobHeartbeatInterval < minimumWorkerInterval {
+		return Config{}, fmt.Errorf("TASKFORGE_JOB_HEARTBEAT_INTERVAL must be at least %s", minimumWorkerInterval)
+	}
+	if cfg.RecoveryInterval < minimumWorkerInterval {
+		return Config{}, fmt.Errorf("TASKFORGE_RECOVERY_INTERVAL must be at least %s", minimumWorkerInterval)
+	}
+	if cfg.JobHeartbeatInterval >= cfg.JobLeaseDuration {
+		return Config{}, errors.New("TASKFORGE_JOB_HEARTBEAT_INTERVAL must be shorter than TASKFORGE_JOB_LEASE_DURATION")
 	}
 
 	maxConns, err := intFromEnv("TASKFORGE_DATABASE_MAX_CONNS", int(cfg.DatabaseMaxConns), 1, maximumConnectionCount)
@@ -114,6 +149,15 @@ func Load() (Config, error) {
 	}
 	cfg.DatabaseMaxConns = int32(maxConns)
 	cfg.DatabaseMinConns = int32(minConns)
+
+	cfg.WorkerConcurrency, err = intFromEnv("TASKFORGE_WORKER_CONCURRENCY", cfg.WorkerConcurrency, 1, maximumWorkerConcurrency)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RecoveryBatchSize, err = intFromEnv("TASKFORGE_RECOVERY_BATCH_SIZE", cfg.RecoveryBatchSize, 1, maximumRecoveryBatchSize)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg.JobPayloadMaxBytes, err = int64FromEnv("TASKFORGE_JOB_PAYLOAD_MAX_BYTES", cfg.JobPayloadMaxBytes, 1, maximumJobDataBytes)
 	if err != nil {

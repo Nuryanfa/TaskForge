@@ -14,6 +14,10 @@ import (
 // Run applies all pending embedded migrations. Goose's PostgreSQL session lock
 // serializes competing migration commands on one dedicated connection.
 func Run(ctx context.Context, databaseURL string) error {
+	return run(ctx, databaseURL, nil)
+}
+
+func run(ctx context.Context, databaseURL string, targetVersion *int64) error {
 	pgxConfig, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
 		return fmt.Errorf("parse database configuration: %w", err)
@@ -40,8 +44,14 @@ func Run(ctx context.Context, databaseURL string) error {
 	if err != nil {
 		return fmt.Errorf("create migration provider: %w", err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+	var migrationErr error
+	if targetVersion == nil {
+		_, migrationErr = provider.Up(ctx)
+	} else {
+		_, migrationErr = provider.UpTo(ctx, *targetVersion)
+	}
+	if migrationErr != nil {
+		return fmt.Errorf("apply migrations: %w", migrationErr)
 	}
 	return nil
 }

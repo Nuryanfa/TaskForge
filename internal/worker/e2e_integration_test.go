@@ -69,7 +69,12 @@ func TestEchoEndToEndIntegration(t *testing.T) {
 
 	runCtx, stopWorker := context.WithCancel(context.Background())
 	runner := worker.New(store, worker.NewRegistry(cfg.JobResultMaxBytes),
-		slog.New(slog.NewTextHandler(io.Discard, nil)), "e2e-worker", 5*time.Millisecond, time.Second, time.Second)
+		slog.New(slog.NewTextHandler(io.Discard, nil)), worker.Options{
+			WorkerID: "e2e-worker", Concurrency: 2, PollInterval: 5 * time.Millisecond,
+			ExecutionTimeout: time.Second, ShutdownTimeout: time.Second,
+			LeaseDuration: 2 * time.Second, HeartbeatInterval: 200 * time.Millisecond,
+			RecoveryInterval: 100 * time.Millisecond, RecoveryBatchSize: 10,
+		})
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- runner.Run(runCtx) }()
 
