@@ -228,8 +228,15 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.7 | Metrics, tracing, dashboards, and SLOs | Planned |
 | v0.8 | High availability, Kubernetes, load, and chaos testing | Planned |
 
-See the [product requirements](docs/PRD.md),
-[current architecture](docs/CURRENT_STATE.md), and [architecture decisions](docs/adr).
+## Documentation
+
+Start at the [documentation index](docs/README.md). Key documents:
+
+- [Product requirements](docs/PRD.md) and [current state](docs/CURRENT_STATE.md)
+- [System design](docs/DESIGN.md) and [data model](docs/DATA_MODEL.md)
+- [HTTP API reference](docs/API.md) and [configuration reference](docs/CONFIGURATION.md)
+- [Operations guide](docs/OPERATIONS.md) and [testing strategy](docs/TESTING.md)
+- [Architecture decision records](docs/adr/README.md)
 
 ## License
 

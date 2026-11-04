@@ -16,7 +16,7 @@ count.
 - Keep features within their documented roadmap milestone.
 - Update the README, PRD, ADRs, and
   [current architecture](docs/CURRENT_STATE.md) when architectural decisions
-  change.
+  change, following the checklist in the [documentation index](docs/README.md).
 
 ## Milestone boundaries
 

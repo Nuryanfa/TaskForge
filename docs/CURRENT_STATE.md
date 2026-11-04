@@ -45,9 +45,20 @@ worker model while PostgreSQL remains the durable coordination authority.
 
 - A hard crash is recoverable only after lease expiry; duplicate external side
   effects remain possible under at-least-once execution.
-- Automatic retry and dead-letter handling
+- Retry policy is global per API process; no per-queue, per-kind, or
+  client-supplied policy, and no bulk redrive.
+- No retention or archival of jobs, attempts, or dead letters.
+
+Not yet implemented:
+
 - NATS, cron/recurring scheduling, workflow DAGs, or saga compensation
 - Arbitrary commands, binaries, scripts, URLs, or user-provided executable code
 - Authentication, public-network exposure, multi-tenancy, or billing
 - gRPC, Prometheus, OpenTelemetry, Kubernetes, or a web dashboard
 - Claims of exactly-once execution or production readiness
+
+## Further reading
+
+[System design](DESIGN.md) · [Data model](DATA_MODEL.md) · [API](API.md) ·
+[Configuration](CONFIGURATION.md) · [Operations](OPERATIONS.md) ·
+[Testing](TESTING.md) · [ADRs](adr/README.md)

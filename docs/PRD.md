@@ -49,7 +49,8 @@ GET  /healthz
 GET  /readyz
 ```
 
-Public job responses omit payloads and idempotency keys. `/healthz` reports only
+The full contract, including request rules and error codes, is in
+[API.md](API.md). Public job responses omit payloads and idempotency keys. `/healthz` reports only
 process liveness. `/readyz` performs a short, bounded PostgreSQL ping. HTTP
 errors use stable public codes without raw dependency details.
 
@@ -62,10 +63,11 @@ and fencing token, assigns a PostgreSQL-clock lease, and inserts the attempt
 before commit. Heartbeat, success, and failure require the current owner and
 fencing token. Outcome and attempt finalization are one transaction.
 
-An expired running job is locked by one recovery process, its current attempt
-is marked `abandoned`, and it returns to `queued` without decrementing its
-attempt count. A future claim receives a higher fencing token. Recovery is not
-an automatic retry policy and adds no backoff or dead-letter behavior.
+An expired running job is locked by one recovery process and its current
+attempt is marked `abandoned` with the retryable code `LEASE_EXPIRED`. Recovery
+then follows the v0.3 retry policy: if attempts remain, the job returns to
+`queued` with backoff applied to `available_at`; otherwise it becomes `failed`
+and is dead-lettered. A future claim receives a higher fencing token.
 
 Submission idempotency is not execution-side idempotency. A caller can safely
 replay creation with the same queue/key and normalized immutable fields, but

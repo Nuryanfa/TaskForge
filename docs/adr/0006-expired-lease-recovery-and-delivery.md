@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for v0.2.
+Accepted for v0.2. Amended by ADR 0007 in v0.3: recovery now applies the
+retry policy (backoff, attempt budget, and dead-lettering) using the retryable
+code `LEASE_EXPIRED`.
 
 ## Context
 
