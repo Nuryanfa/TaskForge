@@ -3,8 +3,8 @@
 ## Problem
 
 Applications need durable asynchronous work without hiding failure behavior.
-TaskForge v0.2 adds safely concurrent, leased execution to the PostgreSQL
-foundation while keeping ownership and failure behavior explicit.
+TaskForge v0.3 adds bounded retry scheduling, execution idempotency metadata,
+and dead-letter operations while keeping ownership and failure explicit.
 
 ## Product principles
 
@@ -14,7 +14,7 @@ foundation while keeping ownership and failure behavior explicit.
 4. Correctness-sensitive SQL is explicit and tested against real PostgreSQL.
 5. Payloads, results, idempotency keys, and database credentials are sensitive.
 
-## Implemented through v0.2
+## Implemented through v0.3
 
 - Embedded, versioned PostgreSQL migrations and a dedicated migration command.
 - Bounded `pgxpool` connection pooling and database operations.
@@ -25,6 +25,11 @@ foundation while keeping ownership and failure behavior explicit.
   fencing tokens.
 - Bounded expired-lease recovery with abandoned-attempt history.
 - Persisted attempts and success/failure/abandoned outcomes.
+- Typed retryable versus permanent failures, snapshotted attempt/backoff policy,
+  capped exponential backoff, and deterministic bounded jitter.
+- Stable execution idempotency keys across attempts and redrive.
+- Payload-free PostgreSQL dead letters with cursor pagination and transactional,
+  idempotent redrive into a new job.
 - A bounded, built-in `demo.echo` handler registry.
 - Process liveness and bounded database-aware readiness.
 - Graceful API and worker shutdown.
@@ -37,11 +42,15 @@ foundation while keeping ownership and failure behavior explicit.
 POST /v1/jobs
 GET  /v1/jobs/{id}
 POST /v1/jobs/{id}/cancel
+GET  /v1/dead-letters
+GET  /v1/dead-letters/{job-id}
+POST /v1/dead-letters/{job-id}/redrive
 GET  /healthz
 GET  /readyz
 ```
 
-Public job responses omit payloads and idempotency keys. `/healthz` reports only
+The full contract, including request rules and error codes, is in
+[API.md](API.md). Public job responses omit payloads and idempotency keys. `/healthz` reports only
 process liveness. `/readyz` performs a short, bounded PostgreSQL ping. HTTP
 errors use stable public codes without raw dependency details.
 
@@ -54,10 +63,11 @@ and fencing token, assigns a PostgreSQL-clock lease, and inserts the attempt
 before commit. Heartbeat, success, and failure require the current owner and
 fencing token. Outcome and attempt finalization are one transaction.
 
-An expired running job is locked by one recovery process, its current attempt
-is marked `abandoned`, and it returns to `queued` without decrementing its
-attempt count. A future claim receives a higher fencing token. Recovery is not
-an automatic retry policy and adds no backoff or dead-letter behavior.
+An expired running job is locked by one recovery process and its current
+attempt is marked `abandoned` with the retryable code `LEASE_EXPIRED`. Recovery
+then follows the v0.3 retry policy: if attempts remain, the job returns to
+`queued` with backoff applied to `available_at`; otherwise it becomes `failed`
+and is dead-lettered. A future claim receives a higher fencing token.
 
 Submission idempotency is not execution-side idempotency. A caller can safely
 replay creation with the same queue/key and normalized immutable fields, but
@@ -70,8 +80,7 @@ side effect and crash before persisting success; lease recovery may then run
 the handler again. Fencing protects TaskForge's PostgreSQL state only. Handler
 integrations need idempotency keys or downstream fencing for their own effects.
 
-v0.2 excludes automatic retry policy, retry backoff, maximum-attempt and
-dead-letter handling, delayed or recurring jobs, NATS, workflow DAGs,
+v0.3 excludes client-controlled delayed or recurring jobs, NATS, workflow DAGs,
 authentication or multitenancy, Kubernetes, and full observability.
 
 ## Acceptance criteria
@@ -99,7 +108,7 @@ authentication or multitenancy, Kubernetes, and full observability.
 | --- | --- |
 | v0.1 | Durable PostgreSQL API, migrations, and sequential worker |
 | v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery (implemented) |
-| v0.3 | Retry scheduling, execution idempotency, and dead-letter queue |
+| v0.3 | Retry scheduling, execution idempotency, and dead-letter queue (implemented) |
 | v0.4 | Delayed and recurring scheduling |
 | v0.5 | Transactional outbox and NATS JetStream |
 | v0.6 | Workflow DAGs and saga compensation |

@@ -32,6 +32,11 @@ const (
 	defaultRecoveryBatchSize            = 100
 	defaultJobPayloadMaxBytes           = 64 * 1024
 	defaultJobResultMaxBytes            = 64 * 1024
+	defaultJobMaxAttempts               = 3
+	defaultRetryInitialBackoff          = time.Second
+	defaultRetryMaxBackoff              = time.Minute
+	defaultRetryJitterPercent           = 20
+	defaultDeadLetterPageSize           = 50
 	maximumConnectionCount              = 100
 	maximumNetworkTimeout               = 5 * time.Minute
 	maximumJobExecutionTimeout          = 30 * time.Minute
@@ -39,8 +44,12 @@ const (
 	minimumLeaseDuration                = time.Second
 	maximumLeaseDuration                = 10 * time.Minute
 	minimumWorkerInterval               = 100 * time.Millisecond
+	minimumRetryBackoff                 = time.Millisecond
 	maximumWorkerConcurrency            = 64
 	maximumRecoveryBatchSize            = 1000
+	maximumJobAttempts                  = 100
+	maximumRetryBackoff                 = 30 * time.Minute
+	maximumDeadLetterPageSize           = 100
 	maximumJobDataBytes           int64 = 1024 * 1024
 )
 
@@ -68,6 +77,11 @@ type Config struct {
 	RecoveryBatchSize      int
 	JobPayloadMaxBytes     int64
 	JobResultMaxBytes      int64
+	JobMaxAttempts         int
+	RetryInitialBackoff    time.Duration
+	RetryMaxBackoff        time.Duration
+	RetryJitterPercent     int
+	DeadLetterPageSize     int
 }
 
 func Load() (Config, error) {
@@ -93,6 +107,11 @@ func Load() (Config, error) {
 		RecoveryBatchSize:      defaultRecoveryBatchSize,
 		JobPayloadMaxBytes:     defaultJobPayloadMaxBytes,
 		JobResultMaxBytes:      defaultJobResultMaxBytes,
+		JobMaxAttempts:         defaultJobMaxAttempts,
+		RetryInitialBackoff:    defaultRetryInitialBackoff,
+		RetryMaxBackoff:        defaultRetryMaxBackoff,
+		RetryJitterPercent:     defaultRetryJitterPercent,
+		DeadLetterPageSize:     defaultDeadLetterPageSize,
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {
@@ -115,6 +134,8 @@ func Load() (Config, error) {
 		{key: "TASKFORGE_JOB_LEASE_DURATION", target: &cfg.JobLeaseDuration, maximum: maximumLeaseDuration},
 		{key: "TASKFORGE_JOB_HEARTBEAT_INTERVAL", target: &cfg.JobHeartbeatInterval, maximum: maximumLeaseDuration},
 		{key: "TASKFORGE_RECOVERY_INTERVAL", target: &cfg.RecoveryInterval, maximum: maximumNetworkTimeout},
+		{key: "TASKFORGE_RETRY_INITIAL_BACKOFF", target: &cfg.RetryInitialBackoff, maximum: maximumRetryBackoff},
+		{key: "TASKFORGE_RETRY_MAX_BACKOFF", target: &cfg.RetryMaxBackoff, maximum: maximumRetryBackoff},
 	}
 	for _, duration := range durations {
 		value, err := durationFromEnv(duration.key, *duration.target, duration.maximum)
@@ -134,6 +155,12 @@ func Load() (Config, error) {
 	}
 	if cfg.JobHeartbeatInterval >= cfg.JobLeaseDuration {
 		return Config{}, errors.New("TASKFORGE_JOB_HEARTBEAT_INTERVAL must be shorter than TASKFORGE_JOB_LEASE_DURATION")
+	}
+	if cfg.RetryInitialBackoff > cfg.RetryMaxBackoff {
+		return Config{}, errors.New("TASKFORGE_RETRY_INITIAL_BACKOFF must not exceed TASKFORGE_RETRY_MAX_BACKOFF")
+	}
+	if cfg.RetryInitialBackoff < minimumRetryBackoff || cfg.RetryMaxBackoff < minimumRetryBackoff {
+		return Config{}, fmt.Errorf("retry backoff durations must be at least %s", minimumRetryBackoff)
 	}
 
 	maxConns, err := intFromEnv("TASKFORGE_DATABASE_MAX_CONNS", int(cfg.DatabaseMaxConns), 1, maximumConnectionCount)
@@ -155,6 +182,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.RecoveryBatchSize, err = intFromEnv("TASKFORGE_RECOVERY_BATCH_SIZE", cfg.RecoveryBatchSize, 1, maximumRecoveryBatchSize)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.JobMaxAttempts, err = intFromEnv("TASKFORGE_JOB_MAX_ATTEMPTS", cfg.JobMaxAttempts, 1, maximumJobAttempts)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RetryJitterPercent, err = intFromEnv("TASKFORGE_RETRY_JITTER_PERCENT", cfg.RetryJitterPercent, 0, 100)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.DeadLetterPageSize, err = intFromEnv("TASKFORGE_DEAD_LETTER_PAGE_SIZE", cfg.DeadLetterPageSize, 1, maximumDeadLetterPageSize)
 	if err != nil {
 		return Config{}, err
 	}

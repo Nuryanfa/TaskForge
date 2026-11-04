@@ -37,7 +37,7 @@ func main() {
 	defer store.Close()
 
 	server := &http.Server{
-		Addr: cfg.HTTPAddr, Handler: httpapi.New(store, cfg.JobPayloadMaxBytes, cfg.DatabaseQueryTimeout),
+		Addr: cfg.HTTPAddr, Handler: httpapi.New(store, cfg.JobPayloadMaxBytes, cfg.DatabaseQueryTimeout, cfg.DeadLetterPageSize),
 		ReadTimeout: cfg.ReadTimeout, ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout: cfg.WriteTimeout, IdleTimeout: cfg.IdleTimeout,
 	}

@@ -63,6 +63,41 @@ func TestV01RunningJobUpgradeIntegration(t *testing.T) {
 	}
 }
 
+func TestV02SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	v2 := int64(2)
+	if err := run(ctx, databaseURL, &v2); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	id := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	var key string
+	var attempts int
+	var initial, max int64
+	if err := conn.QueryRow(ctx, `SELECT execution_idempotency_key,max_attempts,retry_initial_backoff_ms,retry_max_backoff_ms FROM jobs WHERE id=$1`, id).Scan(&key, &attempts, &initial, &max); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uuid.Parse(key); err != nil || attempts != 3 || initial != 1000 || max != 60000 {
+		t.Fatalf("unsafe v0.2 defaults key=%s attempts=%d initial=%d max=%d err=%v", key, attempts, initial, max, err)
+	}
+}
+
 func migrationTestURL(t *testing.T, baseURL string) string {
 	t.Helper()
 	schema := "taskforge_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "_")

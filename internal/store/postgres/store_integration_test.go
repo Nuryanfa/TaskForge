@@ -209,10 +209,10 @@ func TestClaimOrderingAttemptsCancellationAndOutcomesIntegration(t *testing.T) {
 	if err != nil || claimed.Job.ID != secondHigh.ID {
 		t.Fatalf("second claim=%s err=%v", claimed.Job.ID, err)
 	}
-	if err := store.FailJob(ctx, claimed.Execution, "HANDLER_FAILED"); err != nil {
+	if err := store.FailJob(ctx, claimed.Execution, job.Failure{Code: "HANDLER_FAILED"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FailJob(ctx, claimed.Execution, "raw unsafe error"); err == nil {
+	if err := store.FailJob(ctx, claimed.Execution, job.Failure{Code: "raw unsafe error"}); err == nil {
 		t.Fatal("expected unsafe error code rejection")
 	}
 	if _, err := store.ClaimNextJob(ctx, "integration-worker", time.Minute); !errors.Is(err, ErrNotFound) {
@@ -309,8 +309,11 @@ func TestLeaseHeartbeatRecoveryAndFencingIntegration(t *testing.T) {
 	if err := store.CompleteJob(ctx, first.Execution, json.RawMessage(`{}`)); !errors.Is(err, ErrOwnershipLost) {
 		t.Fatalf("stale completion error=%v", err)
 	}
-	if err := store.FailJob(ctx, first.Execution, "STALE_FAILURE"); !errors.Is(err, ErrOwnershipLost) {
+	if err := store.FailJob(ctx, first.Execution, job.Failure{Code: "STALE_FAILURE"}); !errors.Is(err, ErrOwnershipLost) {
 		t.Fatalf("stale failure error=%v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET available_at=NOW() WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
 	}
 	second, err := store.ClaimNextJob(ctx, "worker-two", time.Second)
 	if err != nil {
@@ -390,5 +393,270 @@ func TestConcurrentRecoveryOnlyRecoversLeaseOnceIntegration(t *testing.T) {
 	}
 	if total != 1 {
 		t.Fatalf("total recoveries=%d, want 1", total)
+	}
+}
+
+func TestRetryDeadLetterAndRedriveIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"retry"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET max_attempts=2,retry_initial_backoff_ms=80,
+		retry_max_backoff_ms=80,retry_jitter_percent=0 WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimNextJob(ctx, "retry-worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailJob(ctx, first.Execution, job.Failure{Code: "TEMPORARY_DEPENDENCY", Retryable: true}); err != nil {
+		t.Fatal(err)
+	}
+	retrying, err := store.GetJob(ctx, created.ID)
+	if err != nil || retrying.Status != job.StatusQueued || !retrying.AvailableAt.After(time.Now().Add(-20*time.Millisecond)) {
+		t.Fatalf("retry state=%+v err=%v", retrying, err)
+	}
+	if _, err := store.ClaimNextJob(ctx, "early-worker", time.Second); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("retry claimed early: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	var second job.Claimed
+	for {
+		second, err = store.ClaimNextJob(ctx, "retry-worker", time.Second)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrNotFound) || time.Now().After(deadline) {
+			t.Fatalf("retry not claimable: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if second.Execution.Attempt != 2 || second.Execution.ExecutionKey != first.Execution.ExecutionKey {
+		t.Fatalf("execution identity changed: first=%+v second=%+v", first.Execution, second.Execution)
+	}
+	if err := store.FailJob(ctx, second.Execution, job.Failure{Code: "TEMPORARY_DEPENDENCY", Retryable: true}); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.GetJob(ctx, created.ID)
+	if err != nil || failed.Status != job.StatusFailed || failed.DeadLetteredAt == nil {
+		t.Fatalf("failed=%+v err=%v", failed, err)
+	}
+	letter, err := store.GetDeadLetter(ctx, created.ID)
+	if err != nil || letter.FinalAttempt != 2 {
+		t.Fatalf("letter=%+v err=%v", letter, err)
+	}
+	redriven, isNew, err := store.RedriveDeadLetter(ctx, created.ID)
+	if err != nil || !isNew {
+		t.Fatalf("redrive new=%v err=%v", isNew, err)
+	}
+	replayed, isNew, err := store.RedriveDeadLetter(ctx, created.ID)
+	if err != nil || isNew || replayed.ID != redriven.ID {
+		t.Fatalf("redrive replay=%s/%s new=%v err=%v", redriven.ID, replayed.ID, isNew, err)
+	}
+	if redriven.ExecutionKey != created.ExecutionKey || redriven.IdempotencyKey != nil {
+		t.Fatalf("redrive key/idempotency mismatch")
+	}
+}
+
+func TestPermanentFailureAndConcurrentRedriveIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"permanent"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNextJob(ctx, "worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailJob(ctx, claimed.Execution, job.Failure{Code: "INVALID_JOB_PAYLOAD", Retryable: false}); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(chan string, 8)
+	errs := make(chan error, 8)
+	var wait sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			redriven, _, err := store.RedriveDeadLetter(context.Background(), created.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- redriven.ID
+		}()
+	}
+	wait.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	first := ""
+	for id := range ids {
+		if first == "" {
+			first = id
+		}
+		if id != first {
+			t.Fatalf("duplicate redrives %s/%s", first, id)
+		}
+	}
+	var count int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE execution_idempotency_key=$1`, created.ExecutionKey).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("logical job count=%d err=%v", count, err)
+	}
+}
+
+func TestExpiredAttemptsReachDeadLetterIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"crash-loop"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET max_attempts=2,retry_initial_backoff_ms=1,retry_max_backoff_ms=1,retry_jitter_percent=0 WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		claimed, err := store.ClaimNextJob(ctx, "crasher", time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1`, created.ID); err != nil {
+			t.Fatal(err)
+		}
+		count, err := store.RecoverExpiredJobs(ctx, 10)
+		if err != nil || count != 1 {
+			t.Fatalf("recovery %d count=%d err=%v", attempt, count, err)
+		}
+		_ = claimed
+		if attempt == 1 {
+			if _, err := store.pool.Exec(ctx, `UPDATE jobs SET available_at=NOW() WHERE id=$1`, created.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	letter, err := store.GetDeadLetter(ctx, created.ID)
+	if err != nil || letter.FinalAttempt != 2 || letter.ErrorCode != "LEASE_EXPIRED" {
+		t.Fatalf("letter=%+v err=%v", letter, err)
+	}
+	var abandoned int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM job_attempts WHERE job_id=$1 AND outcome='abandoned'`, created.ID).Scan(&abandoned); err != nil || abandoned != 2 {
+		t.Fatalf("abandoned=%d err=%v", abandoned, err)
+	}
+}
+
+func TestDeadLetterPaginationIsStableAndBoundedIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"page"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := store.ClaimNextJob(ctx, "worker", time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.FailJob(ctx, claimed.Execution, job.Failure{Code: "PERMANENT", Retryable: false}); err != nil {
+			t.Fatal(err)
+		}
+		_ = created
+	}
+	first, more, err := store.ListDeadLetters(ctx, nil, "", 2)
+	if err != nil || len(first) != 2 || !more {
+		t.Fatalf("first page=%d more=%v err=%v", len(first), more, err)
+	}
+	last := first[len(first)-1]
+	second, more, err := store.ListDeadLetters(ctx, &last.DeadLetteredAt, last.JobID, 2)
+	if err != nil || len(second) != 1 || more {
+		t.Fatalf("second page=%d more=%v err=%v", len(second), more, err)
+	}
+	if second[0].JobID == first[0].JobID || second[0].JobID == first[1].JobID {
+		t.Fatal("pagination duplicated a dead letter")
+	}
+}
+
+func TestSuccessfulRetryHasOneTerminalSuccessIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"eventual"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET max_attempts=2,retry_initial_backoff_ms=1,retry_max_backoff_ms=1,retry_jitter_percent=0 WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimNextJob(ctx, "worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailJob(ctx, first.Execution, job.Failure{Code: "TEMPORARY", Retryable: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET available_at=NOW() WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimNextJob(ctx, "worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Execution.ExecutionKey != first.Execution.ExecutionKey {
+		t.Fatal("execution key changed")
+	}
+	if err := store.CompleteJob(ctx, second.Execution, json.RawMessage(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.GetJob(ctx, created.ID)
+	if err != nil || final.Status != job.StatusSucceeded || final.AttemptCount != 2 || final.DeadLetteredAt != nil {
+		t.Fatalf("final=%+v err=%v", final, err)
+	}
+	var successes int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM job_attempts WHERE job_id=$1 AND outcome='succeeded'`, created.ID).Scan(&successes); err != nil || successes != 1 {
+		t.Fatalf("successes=%d err=%v", successes, err)
+	}
+}
+
+func TestConcurrentFailureCreatesOneDeadLetterIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"race"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNextJob(ctx, "worker", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 2)
+	var wait sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errs <- store.FailJob(context.Background(), claimed.Execution, job.Failure{Code: "PERMANENT", Retryable: false})
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	successes, lost := 0, 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrOwnershipLost) {
+			lost++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || lost != 1 {
+		t.Fatalf("successes=%d lost=%d", successes, lost)
+	}
+	var count int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM dead_letters WHERE job_id=$1`, created.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("dead letters=%d err=%v", count, err)
 	}
 }

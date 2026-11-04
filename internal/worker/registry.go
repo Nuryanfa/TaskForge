@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+
+	"github.com/Nuryanfa/TaskForge/internal/job"
 )
 
 const (
@@ -16,13 +18,13 @@ const (
 )
 
 type Handler interface {
-	Execute(context.Context, json.RawMessage) (json.RawMessage, error)
+	Execute(context.Context, job.Execution, json.RawMessage) (json.RawMessage, *job.Failure)
 }
 
-type HandlerFunc func(context.Context, json.RawMessage) (json.RawMessage, error)
+type HandlerFunc func(context.Context, job.Execution, json.RawMessage) (json.RawMessage, *job.Failure)
 
-func (f HandlerFunc) Execute(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
-	return f(ctx, payload)
+func (f HandlerFunc) Execute(ctx context.Context, execution job.Execution, payload json.RawMessage) (json.RawMessage, *job.Failure) {
+	return f(ctx, execution, payload)
 }
 
 type Registry struct {
@@ -43,25 +45,21 @@ func newRegistry(handlers map[string]Handler) *Registry {
 	return &Registry{handlers: copyOfHandlers}
 }
 
-func (r *Registry) Execute(ctx context.Context, kind string, payload json.RawMessage) (json.RawMessage, string) {
+func (r *Registry) Execute(ctx context.Context, execution job.Execution, kind string, payload json.RawMessage) (json.RawMessage, *job.Failure) {
 	handler, ok := r.handlers[kind]
 	if !ok {
-		return nil, ErrorUnknownJobKind
+		return nil, &job.Failure{Code: ErrorUnknownJobKind, Retryable: false}
 	}
-	result, err := handler.Execute(ctx, payload)
-	if err != nil {
-		return nil, ErrorInvalidPayload
-	}
-	return result, ""
+	return handler.Execute(ctx, execution, payload)
 }
 
 type echoHandler struct {
 	maxResultBytes int64
 }
 
-func (h echoHandler) Execute(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+func (h echoHandler) Execute(ctx context.Context, _ job.Execution, payload json.RawMessage) (json.RawMessage, *job.Failure) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, &job.Failure{Code: ErrorExecutionTimeout, Retryable: true}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -69,18 +67,18 @@ func (h echoHandler) Execute(ctx context.Context, payload json.RawMessage) (json
 		Message string `json:"message"`
 	}
 	if err := decoder.Decode(&request); err != nil || request.Message == "" {
-		return nil, errors.New("message is required")
+		return nil, &job.Failure{Code: ErrorInvalidPayload, Retryable: false}
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("payload must contain one object")
+		return nil, &job.Failure{Code: ErrorInvalidPayload, Retryable: false}
 	}
 	result, err := json.Marshal(map[string]string{"message": request.Message})
 	if err != nil {
-		return nil, errors.New("encode echo result")
+		return nil, &job.Failure{Code: "RESULT_ENCODING_FAILED", Retryable: false}
 	}
 	if int64(len(result)) > h.maxResultBytes {
-		return nil, errors.New("echo result exceeds configured limit")
+		return nil, &job.Failure{Code: "RESULT_TOO_LARGE", Retryable: false}
 	}
 	return result, nil
 }

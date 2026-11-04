@@ -19,6 +19,8 @@ type fakeStore struct {
 	created bool
 	err     error
 	value   job.Job
+	letters []job.DeadLetter
+	hasMore bool
 }
 
 func (f *fakeStore) CreateJob(context.Context, job.Submission) (job.Job, bool, error) {
@@ -29,6 +31,40 @@ func (f *fakeStore) CancelQueuedJob(context.Context, string) (job.Job, error) {
 	return f.value, f.err
 }
 func (f *fakeStore) Ping(context.Context) error { return f.err }
+func (f *fakeStore) ListDeadLetters(context.Context, *time.Time, string, int) ([]job.DeadLetter, bool, error) {
+	return f.letters, f.hasMore, f.err
+}
+func (f *fakeStore) GetDeadLetter(context.Context, string) (job.DeadLetter, error) {
+	if len(f.letters) > 0 {
+		return f.letters[0], f.err
+	}
+	return job.DeadLetter{}, f.err
+}
+
+func TestDeadLetterAPIPrivacyPaginationAndRedrive(t *testing.T) {
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	store := &fakeStore{created: true, value: job.Job{ID: uuid.NewString(), Queue: "default", Kind: "demo.echo", Status: job.StatusQueued, Payload: json.RawMessage(`{"secret":"payload"}`), ExecutionKey: "private-execution-key"}, letters: []job.DeadLetter{{JobID: id, Queue: "default", Kind: "demo.echo", FinalAttempt: 3, ErrorCode: "PERMANENT", DeadLetteredAt: now}}, hasMore: true}
+	handler := New(store, 1024, time.Second, 10)
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/dead-letters?limit=1", nil))
+	if list.Code != 200 || !strings.Contains(list.Body.String(), "next_cursor") || strings.Contains(list.Body.String(), "secret") || strings.Contains(list.Body.String(), "private-execution-key") {
+		t.Fatalf("unsafe list: %d %s", list.Code, list.Body.String())
+	}
+	bad := httptest.NewRecorder()
+	handler.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/v1/dead-letters?limit=11", nil))
+	if bad.Code != 400 {
+		t.Fatalf("invalid limit status=%d", bad.Code)
+	}
+	redrive := httptest.NewRecorder()
+	handler.ServeHTTP(redrive, httptest.NewRequest(http.MethodPost, "/v1/dead-letters/"+id+"/redrive", nil))
+	if redrive.Code != 201 || strings.Contains(redrive.Body.String(), "private-execution-key") || strings.Contains(redrive.Body.String(), "secret") {
+		t.Fatalf("unsafe redrive: %d %s", redrive.Code, redrive.Body.String())
+	}
+}
+func (f *fakeStore) RedriveDeadLetter(context.Context, string) (job.Job, bool, error) {
+	return f.value, f.created, f.err
+}
 
 func TestSubmitStatusAndPrivacy(t *testing.T) {
 	id := uuid.NewString()
