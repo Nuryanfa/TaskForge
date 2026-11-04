@@ -30,6 +30,8 @@ const (
 	defaultJobHeartbeatInterval         = 10 * time.Second
 	defaultRecoveryInterval             = 5 * time.Second
 	defaultRecoveryBatchSize            = 100
+	defaultScheduleInterval             = time.Second
+	defaultScheduleBatchSize            = 50
 	defaultJobPayloadMaxBytes           = 64 * 1024
 	defaultJobResultMaxBytes            = 64 * 1024
 	defaultJobMaxAttempts               = 3
@@ -47,6 +49,7 @@ const (
 	minimumRetryBackoff                 = time.Millisecond
 	maximumWorkerConcurrency            = 64
 	maximumRecoveryBatchSize            = 1000
+	maximumScheduleBatchSize            = 500
 	maximumJobAttempts                  = 100
 	maximumRetryBackoff                 = 30 * time.Minute
 	maximumDeadLetterPageSize           = 100
@@ -75,6 +78,8 @@ type Config struct {
 	JobHeartbeatInterval   time.Duration
 	RecoveryInterval       time.Duration
 	RecoveryBatchSize      int
+	ScheduleInterval       time.Duration
+	ScheduleBatchSize      int
 	JobPayloadMaxBytes     int64
 	JobResultMaxBytes      int64
 	JobMaxAttempts         int
@@ -105,6 +110,8 @@ func Load() (Config, error) {
 		JobHeartbeatInterval:   defaultJobHeartbeatInterval,
 		RecoveryInterval:       defaultRecoveryInterval,
 		RecoveryBatchSize:      defaultRecoveryBatchSize,
+		ScheduleInterval:       defaultScheduleInterval,
+		ScheduleBatchSize:      defaultScheduleBatchSize,
 		JobPayloadMaxBytes:     defaultJobPayloadMaxBytes,
 		JobResultMaxBytes:      defaultJobResultMaxBytes,
 		JobMaxAttempts:         defaultJobMaxAttempts,
@@ -134,6 +141,7 @@ func Load() (Config, error) {
 		{key: "TASKFORGE_JOB_LEASE_DURATION", target: &cfg.JobLeaseDuration, maximum: maximumLeaseDuration},
 		{key: "TASKFORGE_JOB_HEARTBEAT_INTERVAL", target: &cfg.JobHeartbeatInterval, maximum: maximumLeaseDuration},
 		{key: "TASKFORGE_RECOVERY_INTERVAL", target: &cfg.RecoveryInterval, maximum: maximumNetworkTimeout},
+		{key: "TASKFORGE_SCHEDULE_INTERVAL", target: &cfg.ScheduleInterval, maximum: maximumWorkerPollInterval},
 		{key: "TASKFORGE_RETRY_INITIAL_BACKOFF", target: &cfg.RetryInitialBackoff, maximum: maximumRetryBackoff},
 		{key: "TASKFORGE_RETRY_MAX_BACKOFF", target: &cfg.RetryMaxBackoff, maximum: maximumRetryBackoff},
 	}
@@ -152,6 +160,9 @@ func Load() (Config, error) {
 	}
 	if cfg.RecoveryInterval < minimumWorkerInterval {
 		return Config{}, fmt.Errorf("TASKFORGE_RECOVERY_INTERVAL must be at least %s", minimumWorkerInterval)
+	}
+	if cfg.ScheduleInterval < minimumWorkerInterval {
+		return Config{}, fmt.Errorf("TASKFORGE_SCHEDULE_INTERVAL must be at least %s", minimumWorkerInterval)
 	}
 	if cfg.JobHeartbeatInterval >= cfg.JobLeaseDuration {
 		return Config{}, errors.New("TASKFORGE_JOB_HEARTBEAT_INTERVAL must be shorter than TASKFORGE_JOB_LEASE_DURATION")
@@ -182,6 +193,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.RecoveryBatchSize, err = intFromEnv("TASKFORGE_RECOVERY_BATCH_SIZE", cfg.RecoveryBatchSize, 1, maximumRecoveryBatchSize)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ScheduleBatchSize, err = intFromEnv("TASKFORGE_SCHEDULE_BATCH_SIZE", cfg.ScheduleBatchSize, 1, maximumScheduleBatchSize)
 	if err != nil {
 		return Config{}, err
 	}

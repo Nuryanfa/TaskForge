@@ -18,7 +18,7 @@ const jobColumns = `id, queue, kind, payload, payload_hash, status, priority,
 idempotency_key, available_at, attempt_count, result, last_error_code,
 created_at, updated_at, started_at, completed_at, lease_owner, lease_expires_at,
 fencing_token, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
-retry_max_backoff_ms, retry_jitter_percent, dead_lettered_at`
+retry_max_backoff_ms, retry_jitter_percent, dead_lettered_at, schedule_id, scheduled_for`
 
 var errorCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
@@ -30,17 +30,24 @@ func (s *Store) CreateJob(ctx context.Context, submission job.Submission) (job.J
 	id := uuid.NewString()
 	query := `INSERT INTO jobs
 		(id, queue, kind, payload, payload_hash, status, priority, idempotency_key,
-		execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
+		available_at, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
 		retry_max_backoff_ms, retry_jitter_percent)
-		VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11, $12)`
+		VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7,
+		COALESCE($13::timestamptz, NOW() + (COALESCE($14::bigint, 0) * INTERVAL '1 second')),
+		$8, $9, $10, $11, $12)`
 	if submission.IdempotencyKey != nil {
 		query += ` ON CONFLICT (queue, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
 	}
 	query += ` RETURNING ` + jobColumns
+	var delaySeconds *int64
+	if submission.DelaySeconds != nil {
+		d := int64(*submission.DelaySeconds)
+		delaySeconds = &d
+	}
 	created, err := scanJob(s.pool.QueryRow(queryCtx, query, id, submission.Queue, submission.Kind,
 		submission.Payload, submission.Fingerprint[:], submission.Priority, submission.IdempotencyKey,
 		uuid.NewString(), s.retryPolicy.maxAttempts, s.retryPolicy.initialBackoff.Milliseconds(),
-		s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent))
+		s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, submission.RunAt, delaySeconds))
 	if err == nil {
 		return created, true, nil
 	}
@@ -323,7 +330,7 @@ func scanJob(row rowScanner) (job.Job, error) {
 		&found.AttemptCount, &found.Result, &found.LastErrorCode, &found.CreatedAt,
 		&found.UpdatedAt, &found.StartedAt, &found.CompletedAt, &found.LeaseOwner,
 		&found.LeaseExpiresAt, &found.FencingToken, &found.ExecutionKey, &found.MaxAttempts,
-		&initialMS, &maxMS, &found.JitterPercent, &found.DeadLetteredAt)
+		&initialMS, &maxMS, &found.JitterPercent, &found.DeadLetteredAt, &found.ScheduleID, &found.ScheduledFor)
 	found.InitialBackoff = time.Duration(initialMS) * time.Millisecond
 	found.MaxBackoff = time.Duration(maxMS) * time.Millisecond
 	return found, err

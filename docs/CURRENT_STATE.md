@@ -3,17 +3,26 @@
 ## Product
 
 TaskForge is an educational, production-like durable job platform written in
-Go. v0.3 adds bounded retry and dead-letter handling to the leased concurrent
-worker model while PostgreSQL remains the durable coordination authority.
+Go. v0.4 adds client-controlled delayed jobs and recurring cron schedules to the
+leased, retry-capable worker model while PostgreSQL remains the durable
+coordination authority.
 
-## Current implemented state (v0.3)
+## Current implemented state (v0.4)
 
 - Commands: `taskforge-api`, `taskforge-worker`, and `taskforge-migrate`.
 - PostgreSQL access uses bounded `pgxpool` connections and explicit SQL.
 - Goose applies embedded SQL migrations under a PostgreSQL advisory lock.
-- The HTTP API submits, inspects, and cancels jobs, with health/readiness.
+- The HTTP API submits, inspects, and cancels jobs, manages dead letters and
+  recurring schedules, and exposes health/readiness.
 - Creation idempotency is scoped by `(queue, idempotency_key)` and compares a
-  SHA-256 fingerprint over normalized queue, kind, payload, and priority.
+  SHA-256 fingerprint over normalized queue, kind, payload, priority, and
+  optional delayed timing (`run_at` or `delay_seconds`).
+- Delayed jobs remain `queued` until `available_at <= NOW()` and can be canceled
+  before claim.
+- Recurring schedules use 5-field cron expressions and IANA timezones, are
+  materialized transactionally with `FOR UPDATE SKIP LOCKED`, enforce per-slot
+  uniqueness `(schedule_id, scheduled_for)`, and coalesce missed ticks into at
+  most one catch-up run.
 - Worker processes use fixed-size executor pools and may safely cooperate.
 - Claims assign PostgreSQL-clock leases and monotonically increasing fencing
   tokens before handler execution.
@@ -51,7 +60,7 @@ worker model while PostgreSQL remains the durable coordination authority.
 
 Not yet implemented:
 
-- NATS, cron/recurring scheduling, workflow DAGs, or saga compensation
+- NATS, workflow DAGs, or saga compensation
 - Arbitrary commands, binaries, scripts, URLs, or user-provided executable code
 - Authentication, public-network exposure, multi-tenancy, or billing
 - gRPC, Prometheus, OpenTelemetry, Kubernetes, or a web dashboard

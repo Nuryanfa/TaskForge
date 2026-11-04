@@ -50,7 +50,8 @@ func (s *workerStore) FailJob(_ context.Context, _ job.Execution, _ job.Failure)
 	s.failed++
 	return nil
 }
-func (s *workerStore) RecoverExpiredJobs(context.Context, int) (int, error) { return 0, nil }
+func (s *workerStore) RecoverExpiredJobs(context.Context, int) (int, error)   { return 0, nil }
+func (s *workerStore) DispatchDueSchedules(context.Context, int) (int, error) { return 0, nil }
 
 func testOptions() Options {
 	return Options{WorkerID: "worker", Concurrency: 2, PollInterval: time.Millisecond,

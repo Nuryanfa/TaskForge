@@ -1,14 +1,15 @@
-# TaskForge data model (schema v3)
+# TaskForge data model (schema v4)
 
 PostgreSQL is the only durable store. The schema is defined by the embedded
 migrations in [`db/migrations`](../db/migrations) and applied by
 `taskforge-migrate` using goose. This document describes the schema after
-migration `000003`.
+migration `000004`.
 
 ## Entity relationships
 
 ```mermaid
 erDiagram
+    schedules ||--o{ jobs : "schedule_id → materializes"
     jobs ||--o{ job_attempts : "has attempts"
     jobs ||--o| dead_letters : "may be dead-lettered"
     dead_letters |o--o| jobs : "redriven_job_id → new job"
@@ -87,6 +88,8 @@ erDiagram
 | `retry_max_backoff_ms` | `BIGINT` | `>= initial`, `<= 86400000`, default 60000 | Snapshotted. |
 | `retry_jitter_percent` | `SMALLINT` | `0..100`, default 20 | Snapshotted. |
 | `dead_lettered_at` | `TIMESTAMPTZ` | nullable | Set when the job enters the DLQ. |
+| `schedule_id` | `UUID` | nullable, FK → `schedules.id` `ON DELETE SET NULL` | Originating recurring schedule. |
+| `scheduled_for` | `TIMESTAMPTZ` | non-NULL when `schedule_id` is non-NULL | Target cron slot time. |
 
 ### Invariants
 
@@ -96,6 +99,8 @@ erDiagram
   that lowers `fencing_token` raises an exception.
 - **Submission uniqueness (`jobs_idempotency_key_unique`)**: partial unique
   index on `(queue, idempotency_key) WHERE idempotency_key IS NOT NULL`.
+- **Schedule slot uniqueness (`jobs_schedule_slot_unique`)**: partial unique
+  index on `(schedule_id, scheduled_for) WHERE schedule_id IS NOT NULL`.
 
 ## `job_attempts`
 
@@ -131,17 +136,38 @@ A job in `running` state always has exactly one open attempt
 
 No payloads, results, or keys are stored here by design (ADR 0009).
 
+## `schedules`
+
+| Column | Type | Constraints | Purpose |
+| --- | --- | --- | --- |
+| `id` | `UUID` | PK | Schedule identifier. |
+| `name` | `TEXT` | UNIQUE, `^[a-z0-9][a-z0-9._-]{0,63}$` | Human/operator schedule name and creation idempotency key. |
+| `queue`, `kind` | `TEXT` | identifier pattern | Target queue and handler kind. |
+| `payload` | `JSONB` | object | Canonicalized job payload template. Sensitive. |
+| `payload_hash` | `BYTEA` | 32 bytes | SHA-256 creation fingerprint. |
+| `priority` | `SMALLINT` | `-100..100`, default 0 | Job priority. |
+| `cron_expr` | `TEXT` | 9–128 chars | Normalized 5-field cron expression. |
+| `timezone` | `TEXT` | 1–64 chars, default `UTC` | IANA timezone name. |
+| `paused` | `BOOLEAN` | default `FALSE` | Whether dispatch is paused. |
+| `next_run_at` | `TIMESTAMPTZ` | NOT NULL | Next cron slot to materialize. |
+| `last_run_at` | `TIMESTAMPTZ` | nullable | Most recently materialized slot. |
+| `last_job_id` | `UUID` | nullable, FK → `jobs.id` `ON DELETE SET NULL` | Most recently materialized job. |
+| `created_at`, `updated_at` | `TIMESTAMPTZ` | default `NOW()` | Audit timestamps. |
+
 ## Indexes and the queries they serve
 
 | Index | Definition | Used by |
 | --- | --- | --- |
 | `jobs_idempotency_key_unique` | `UNIQUE (queue, idempotency_key) WHERE idempotency_key IS NOT NULL` | `CreateJob` conflict detection and replay lookup. |
+| `jobs_schedule_slot_unique` | `UNIQUE (schedule_id, scheduled_for) WHERE schedule_id IS NOT NULL` | `DispatchDueSchedules` duplicate slot prevention. |
 | `jobs_claim_index` | `(priority DESC, created_at, id) WHERE status='queued'` | v0.1/v0.2 claim ordering. |
 | `jobs_retry_eligibility_index` | `(available_at, priority DESC, created_at, id) WHERE status='queued'` | `ClaimNextJob` with `available_at <= NOW()`. |
 | `jobs_expired_lease_index` | `(lease_expires_at, id) WHERE status='running'` | `RecoverExpiredJobs`. |
 | `job_attempts_job_history_index` | `(job_id, attempt)` | Attempt history lookups. |
 | `job_attempts_fencing_lookup_index` | `(job_id, fencing_token)` | Fenced attempt finalization. |
 | `dead_letters_inspection_index` | `(dead_lettered_at DESC, job_id DESC)` | Keyset pagination in `ListDeadLetters`. |
+| `schedules_due_index` | `(next_run_at, id) WHERE NOT paused` | `DispatchDueSchedules`. |
+| `schedules_list_index` | `(created_at DESC, id DESC)` | Keyset pagination in `ListSchedules`. |
 
 ## Migration history
 
@@ -150,6 +176,7 @@ No payloads, results, or keys are stored here by design (ADR 0009).
 | 1 | `000001_create_jobs.sql` | v0.1 | `jobs`, `job_attempts`, idempotency and claim indexes. |
 | 2 | `000002_add_job_leases.sql` | v0.2 | Lease and fencing columns, monotonic trigger, `abandoned` outcome, lease invariant. Recovers v0.1 `running` rows as `abandoned` (`V01_MIGRATION_RECOVERY`) and requeues them. |
 | 3 | `000003_add_retry_and_dead_letters.sql` | v0.3 | Execution key, retry snapshot columns, `dead_lettered_at`, `dead_letters` table, retry eligibility and DLQ indexes. |
+| 4 | `000004_add_schedules.sql` | v0.4 | `schedules` table, `jobs.schedule_id` and `scheduled_for`, per-slot unique index, due/list indexes. |
 
 ### Migration rules
 
