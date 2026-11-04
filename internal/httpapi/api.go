@@ -26,6 +26,11 @@ type Store interface {
 	ListDeadLetters(context.Context, *time.Time, string, int) ([]job.DeadLetter, bool, error)
 	GetDeadLetter(context.Context, string) (job.DeadLetter, error)
 	RedriveDeadLetter(context.Context, string) (job.Job, bool, error)
+	CreateSchedule(context.Context, job.ScheduleSubmission) (job.Schedule, bool, error)
+	GetSchedule(context.Context, string) (job.Schedule, error)
+	ListSchedules(context.Context, *time.Time, string, int) ([]job.Schedule, bool, error)
+	SetSchedulePaused(context.Context, string, bool) (job.Schedule, error)
+	DeleteSchedule(context.Context, string) error
 }
 
 type API struct {
@@ -62,6 +67,8 @@ type jobResponse struct {
 	ResultBytes   int        `json:"result_bytes,omitempty"`
 	MaxAttempts   int        `json:"max_attempts"`
 	DeadLettered  bool       `json:"dead_lettered"`
+	ScheduleID    *string    `json:"schedule_id,omitempty"`
+	ScheduledFor  *time.Time `json:"scheduled_for,omitempty"`
 }
 
 type submitRequest struct {
@@ -70,6 +77,40 @@ type submitRequest struct {
 	Payload        json.RawMessage `json:"payload"`
 	Priority       int             `json:"priority"`
 	IdempotencyKey *string         `json:"idempotency_key"`
+	RunAt          *time.Time      `json:"run_at"`
+	DelaySeconds   *int            `json:"delay_seconds"`
+}
+
+type createScheduleRequest struct {
+	Name     string          `json:"name"`
+	Queue    string          `json:"queue"`
+	Kind     string          `json:"kind"`
+	Payload  json.RawMessage `json:"payload"`
+	Priority int             `json:"priority"`
+	CronExpr string          `json:"cron_expr"`
+	Timezone string          `json:"timezone"`
+	Paused   bool            `json:"paused"`
+}
+
+type scheduleResponse struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Queue     string     `json:"queue"`
+	Kind      string     `json:"kind"`
+	Priority  int16      `json:"priority"`
+	CronExpr  string     `json:"cron_expr"`
+	Timezone  string     `json:"timezone"`
+	Paused    bool       `json:"paused"`
+	NextRunAt time.Time  `json:"next_run_at"`
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
+	LastJobID *string    `json:"last_job_id,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+type schedulePage struct {
+	Items      []scheduleResponse `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -89,6 +130,12 @@ func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration, pag
 	mux.HandleFunc("GET /v1/dead-letters", api.listDeadLetters)
 	mux.HandleFunc("GET /v1/dead-letters/{id}", api.getDeadLetter)
 	mux.HandleFunc("POST /v1/dead-letters/{id}/redrive", api.redriveDeadLetter)
+	mux.HandleFunc("POST /v1/schedules", api.createSchedule)
+	mux.HandleFunc("GET /v1/schedules", api.listSchedules)
+	mux.HandleFunc("GET /v1/schedules/{id}", api.getSchedule)
+	mux.HandleFunc("POST /v1/schedules/{id}/pause", api.pauseSchedule)
+	mux.HandleFunc("POST /v1/schedules/{id}/resume", api.resumeSchedule)
+	mux.HandleFunc("DELETE /v1/schedules/{id}", api.deleteSchedule)
 	mux.HandleFunc("/healthz", api.methodNotAllowed)
 	mux.HandleFunc("/readyz", api.methodNotAllowed)
 	mux.HandleFunc("/v1/jobs", api.methodNotAllowed)
@@ -97,6 +144,10 @@ func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration, pag
 	mux.HandleFunc("/v1/dead-letters", api.methodNotAllowed)
 	mux.HandleFunc("/v1/dead-letters/{id}", api.methodNotAllowed)
 	mux.HandleFunc("/v1/dead-letters/{id}/redrive", api.methodNotAllowed)
+	mux.HandleFunc("/v1/schedules", api.methodNotAllowed)
+	mux.HandleFunc("/v1/schedules/{id}", api.methodNotAllowed)
+	mux.HandleFunc("/v1/schedules/{id}/pause", api.methodNotAllowed)
+	mux.HandleFunc("/v1/schedules/{id}/resume", api.methodNotAllowed)
 	mux.HandleFunc("/", api.notFound)
 	return api.withRequestID(mux)
 }
@@ -147,7 +198,7 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	submission, err := job.NewSubmission(request.Queue, request.Kind, request.Payload, request.Priority, request.IdempotencyKey, a.payloadMaxBytes)
+	submission, err := job.NewDelayedSubmission(request.Queue, request.Kind, request.Payload, request.Priority, request.IdempotencyKey, request.RunAt, request.DelaySeconds, time.Now(), a.payloadMaxBytes)
 	if err != nil {
 		status := http.StatusBadRequest
 		code := "VALIDATION_FAILED"
@@ -220,40 +271,9 @@ type pageCursor struct {
 }
 
 func (a *API) listDeadLetters(w http.ResponseWriter, r *http.Request) {
-	for key := range r.URL.Query() {
-		if key != "limit" && key != "cursor" {
-			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "only limit and cursor are supported")
-			return
-		}
-		if len(r.URL.Query()[key]) != 1 {
-			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "query parameters must not be repeated")
-			return
-		}
-	}
-	limit := a.deadLetterPageSize
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > a.deadLetterPageSize {
-			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "limit is outside the allowed range")
-			return
-		}
-		limit = value
-	}
-	var before *time.Time
-	beforeID := ""
-	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		decoded, err := base64.RawURLEncoding.DecodeString(raw)
-		var cursor pageCursor
-		if err != nil || json.Unmarshal(decoded, &cursor) != nil || cursor.At.IsZero() {
-			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid")
-			return
-		}
-		if _, err := uuid.Parse(cursor.ID); err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid")
-			return
-		}
-		before = &cursor.At
-		beforeID = cursor.ID
+	limit, before, beforeID, ok := a.parsePaginationQuery(w, r)
+	if !ok {
+		return
 	}
 	items, more, err := a.store.ListDeadLetters(r.Context(), before, beforeID, limit)
 	if err != nil {
@@ -310,6 +330,186 @@ func deadLetterForResponse(v job.DeadLetter) deadLetterResponse {
 		ErrorCode: v.ErrorCode, DeadLetteredAt: v.DeadLetteredAt,
 		RedrivenJobID: v.RedrivenJobID, RedrivenAt: v.RedrivenAt,
 	}
+}
+
+func (a *API) createSchedule(w http.ResponseWriter, r *http.Request) {
+	if err := validateJSONHeaders(r); err != nil {
+		writeError(w, r, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", err.Error())
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, a.payloadMaxBytes+4096)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request createScheduleRequest
+	if err := decoder.Decode(&request); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds the configured limit")
+			return
+		}
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "request body must be one valid JSON object")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "request body must contain exactly one JSON object")
+		return
+	}
+
+	submission, err := job.NewScheduleSubmission(request.Name, request.Queue, request.Kind, request.Payload, request.Priority, request.CronExpr, request.Timezone, request.Paused, a.payloadMaxBytes)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := "VALIDATION_FAILED"
+		if strings.Contains(err.Error(), "configured limit") {
+			status = http.StatusRequestEntityTooLarge
+			code = "PAYLOAD_TOO_LARGE"
+		}
+		writeError(w, r, status, code, err.Error())
+		return
+	}
+	created, isNew, err := a.store.CreateSchedule(r.Context(), submission)
+	if err != nil {
+		a.writeScheduleStoreError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if isNew {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, responseForSchedule(created))
+}
+
+func (a *API) listSchedules(w http.ResponseWriter, r *http.Request) {
+	limit, before, beforeID, ok := a.parsePaginationQuery(w, r)
+	if !ok {
+		return
+	}
+	items, more, err := a.store.ListSchedules(r.Context(), before, beforeID, limit)
+	if err != nil {
+		a.writeScheduleStoreError(w, r, err)
+		return
+	}
+	response := schedulePage{Items: make([]scheduleResponse, 0, len(items))}
+	for _, item := range items {
+		response.Items = append(response.Items, responseForSchedule(item))
+	}
+	if more && len(items) > 0 {
+		last := items[len(items)-1]
+		encoded, _ := json.Marshal(pageCursor{At: last.CreatedAt, ID: last.ID})
+		response.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *API) getSchedule(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_ID", "schedule ID must be a valid UUID")
+		return
+	}
+	found, err := a.store.GetSchedule(r.Context(), id)
+	if err != nil {
+		a.writeScheduleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, responseForSchedule(found))
+}
+
+func (a *API) pauseSchedule(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_ID", "schedule ID must be a valid UUID")
+		return
+	}
+	updated, err := a.store.SetSchedulePaused(r.Context(), id, true)
+	if err != nil {
+		a.writeScheduleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, responseForSchedule(updated))
+}
+
+func (a *API) resumeSchedule(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_ID", "schedule ID must be a valid UUID")
+		return
+	}
+	updated, err := a.store.SetSchedulePaused(r.Context(), id, false)
+	if err != nil {
+		a.writeScheduleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, responseForSchedule(updated))
+}
+
+func (a *API) deleteSchedule(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_ID", "schedule ID must be a valid UUID")
+		return
+	}
+	if err := a.store.DeleteSchedule(r.Context(), id); err != nil {
+		a.writeScheduleStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) parsePaginationQuery(w http.ResponseWriter, r *http.Request) (int, *time.Time, string, bool) {
+	for key := range r.URL.Query() {
+		if key != "limit" && key != "cursor" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "only limit and cursor are supported")
+			return 0, nil, "", false
+		}
+		if len(r.URL.Query()[key]) != 1 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "query parameters must not be repeated")
+			return 0, nil, "", false
+		}
+	}
+	limit := a.deadLetterPageSize
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > a.deadLetterPageSize {
+			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "limit is outside the allowed range")
+			return 0, nil, "", false
+		}
+		limit = value
+	}
+	var before *time.Time
+	beforeID := ""
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		var cursor pageCursor
+		if err != nil || json.Unmarshal(decoded, &cursor) != nil || cursor.At.IsZero() {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid")
+			return 0, nil, "", false
+		}
+		if _, err := uuid.Parse(cursor.ID); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is invalid")
+			return 0, nil, "", false
+		}
+		before = &cursor.At
+		beforeID = cursor.ID
+	}
+	return limit, before, beforeID, true
+}
+
+func responseForSchedule(v job.Schedule) scheduleResponse {
+	return scheduleResponse{
+		ID: v.ID, Name: v.Name, Queue: v.Queue, Kind: v.Kind, Priority: v.Priority,
+		CronExpr: v.CronExpr, Timezone: v.Timezone, Paused: v.Paused,
+		NextRunAt: v.NextRunAt, LastRunAt: v.LastRunAt, LastJobID: v.LastJobID,
+		CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt,
+	}
+}
+
+func (a *API) writeScheduleStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, postgres.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "SCHEDULE_NOT_FOUND", "schedule was not found")
+		return
+	}
+	a.writeStoreError(w, r, err)
 }
 
 func (a *API) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
@@ -371,6 +571,7 @@ func responseForJob(value job.Job) jobResponse {
 		StartedAt: value.StartedAt, CompletedAt: value.CompletedAt,
 		LastErrorCode: value.LastErrorCode, HasResult: len(value.Result) > 0, ResultBytes: len(value.Result),
 		MaxAttempts: value.MaxAttempts, DeadLettered: value.DeadLetteredAt != nil,
+		ScheduleID: value.ScheduleID, ScheduledFor: value.ScheduledFor,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestNewSubmissionValidation(t *testing.T) {
@@ -68,5 +69,49 @@ func TestNewSubmissionRejectsInvalidIdempotencyKeysAndPayloadBounds(t *testing.T
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestNewDelayedSubmissionValidationAndFingerprint(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 12, 0, 0, 0, time.UTC)
+	runAtUTC := now.Add(10 * time.Minute)
+	Jakarta, _ := time.LoadLocation("Asia/Jakarta")
+	runAtJakarta := runAtUTC.In(Jakarta)
+
+	subUTC, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{"message":"hi"}`), 0, nil, &runAtUTC, nil, now, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subJakarta, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{"message":"hi"}`), 0, nil, &runAtJakarta, nil, now, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(subUTC.Fingerprint[:], subJakarta.Fingerprint[:]) {
+		t.Fatal("equivalent timestamps in different timezones produced different fingerprints")
+	}
+
+	delay := 60
+	subDelay, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{"message":"hi"}`), 0, nil, nil, &delay, now, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(subUTC.Fingerprint[:], subDelay.Fingerprint[:]) {
+		t.Fatal("run_at and delay_seconds should produce distinct fingerprints")
+	}
+
+	if _, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{}`), 0, nil, &runAtUTC, &delay, now, 1024); err == nil {
+		t.Fatal("expected mutually exclusive run_at and delay_seconds error")
+	}
+	negativeDelay := -1
+	if _, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{}`), 0, nil, nil, &negativeDelay, now, 1024); err == nil {
+		t.Fatal("expected negative delay_seconds error")
+	}
+	excessiveDelay := MaxDelaySeconds + 1
+	if _, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{}`), 0, nil, nil, &excessiveDelay, now, 1024); err == nil {
+		t.Fatal("expected excessive delay_seconds error")
+	}
+	tooFarFuture := now.Add(MaxScheduleHorizon + time.Minute)
+	if _, err := NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{}`), 0, nil, &tooFarFuture, nil, now, 1024); err == nil {
+		t.Fatal("expected excessive run_at error")
 	}
 }

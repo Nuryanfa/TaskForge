@@ -37,10 +37,12 @@ tests can run in parallel against one database.
 | Heartbeat, recovery, fencing | `TestLeaseHeartbeatRecoveryAndFencingIntegration`, `TestHealthyHeartbeatPreventsRecoveryIntegration`, `TestConcurrentRecoveryOnlyRecoversLeaseOnceIntegration` |
 | Retry → DLQ → redrive | `TestRetryDeadLetterAndRedriveIntegration`, `TestPermanentFailureAndConcurrentRedriveIntegration`, `TestExpiredAttemptsReachDeadLetterIntegration`, `TestSuccessfulRetryHasOneTerminalSuccessIntegration`, `TestConcurrentFailureCreatesOneDeadLetterIntegration` |
 | Stable DLQ pagination | `TestDeadLetterPaginationIsStableAndBoundedIntegration` |
-| Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration` |
+| Delayed job eligibility and idempotency | `TestNewDelayedSubmissionValidationAndFingerprint`, `TestDelayedJobClaimEligibilityAndCancellationIntegration` |
+| Cron parsing, timezone evaluation, and schedule dispatch | `TestParseCronAndNext`, `TestNewScheduleSubmissionValidationAndFingerprint`, `TestScheduleAPICreateListPauseResumeDeleteAndPrivacy`, `TestScheduleCreateReplayPauseResumeDeleteAndConcurrentDispatchIntegration` |
+| Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration` |
 | Bounded concurrency and shutdown | `TestRunnerNeverExceedsConfiguredConcurrency`, `TestRunnerGracefulShutdownIsBoundedAndStopsClaims` |
 | Execution metadata reaches handlers | `TestHandlerReceivesStableExecutionMetadata`, `TestRegistry` |
-| Full pipeline | `TestEchoEndToEndIntegration` |
+| Full pipeline | `TestEchoEndToEndIntegration`, `TestRecurringScheduleEndToEndIntegration` |
 
 ## Running the suites
 

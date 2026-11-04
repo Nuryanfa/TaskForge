@@ -28,7 +28,9 @@ readiness; graceful shutdown; and real PostgreSQL integration tests.
 v0.2 provides bounded concurrent worker goroutines, job leases, fencing tokens,
 lease heartbeat and renewal, expired-lease recovery, and worker crash recovery.
 v0.3 provides typed failures, bounded retry/backoff, execution idempotency
-metadata, and dead-letter inspection/redrive. Contributions must not add NATS, scheduled jobs,
+metadata, and dead-letter inspection/redrive.
+v0.4 provides delayed job submission (`run_at` / `delay_seconds`) and durable
+recurring cron schedules. Contributions must not add NATS,
 workflow DAGs, Kubernetes, or a web UI.
 
 ## Validation

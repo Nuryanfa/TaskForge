@@ -1,14 +1,15 @@
 # TaskForge
 
-TaskForge v0.3 is a durable PostgreSQL-backed background job platform written
+TaskForge v0.4 is a durable PostgreSQL-backed background job platform written
 in Go. It provides bounded leased execution, retry scheduling with deterministic
-jitter, stable execution idempotency keys, and a PostgreSQL dead-letter queue.
+jitter, stable execution idempotency keys, a PostgreSQL dead-letter queue, and
+client-controlled delayed and recurring cron scheduling.
 
 > TaskForge is an educational portfolio project. It is not production ready,
 > does not promise exactly-once execution, and must not be exposed directly to
 > an untrusted public network.
 
-## v0.3 architecture
+## v0.4 architecture
 
 ```mermaid
 flowchart LR
@@ -222,7 +223,7 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.1 | Durable PostgreSQL API, migrations, and sequential worker | Implemented |
 | v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery | Implemented |
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue | Implemented |
-| v0.4 | Delayed and recurring scheduling | Planned |
+| v0.4 | Delayed and recurring scheduling | Implemented |
 | v0.5 | Transactional outbox and NATS JetStream | Planned |
 | v0.6 | Workflow DAGs and saga compensation | Planned |
 | v0.7 | Metrics, tracing, dashboards, and SLOs | Planned |

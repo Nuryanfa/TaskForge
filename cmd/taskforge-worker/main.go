@@ -34,7 +34,8 @@ func main() {
 			PollInterval: cfg.WorkerPollInterval, ExecutionTimeout: cfg.JobExecutionTimeout,
 			ShutdownTimeout: cfg.ShutdownTimeout, LeaseDuration: cfg.JobLeaseDuration,
 			HeartbeatInterval: cfg.JobHeartbeatInterval, RecoveryInterval: cfg.RecoveryInterval,
-			RecoveryBatchSize: cfg.RecoveryBatchSize,
+			RecoveryBatchSize: cfg.RecoveryBatchSize, ScheduleInterval: cfg.ScheduleInterval,
+			ScheduleBatchSize: cfg.ScheduleBatchSize,
 		},
 	)
 	logger.Info("worker_started", "worker_id", cfg.WorkerID, "concurrency", cfg.WorkerConcurrency)

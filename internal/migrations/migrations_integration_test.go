@@ -98,6 +98,40 @@ func TestV02SchemaUpgradeIntegration(t *testing.T) {
 	}
 }
 
+func TestV03SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	v3 := int64(3)
+	if err := run(ctx, databaseURL, &v3); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	id := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	var scheduleID *string
+	var scheduledFor *time.Time
+	if err := conn.QueryRow(ctx, `SELECT schedule_id, scheduled_for FROM jobs WHERE id=$1`, id).Scan(&scheduleID, &scheduledFor); err != nil {
+		t.Fatal(err)
+	}
+	if scheduleID != nil || scheduledFor != nil {
+		t.Fatalf("expected nil schedule linkage on upgraded v0.3 job, got schedule_id=%v scheduled_for=%v", scheduleID, scheduledFor)
+	}
+}
+
 func migrationTestURL(t *testing.T, baseURL string) string {
 	t.Helper()
 	schema := "taskforge_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "_")

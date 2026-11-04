@@ -49,6 +49,8 @@ Process legend: **A** = `taskforge-api`, **W** = `taskforge-worker`,
 | `TASKFORGE_JOB_HEARTBEAT_INTERVAL` | `10s` | `≥ 100ms`, **< lease** | Recommended ≤ lease/3. |
 | `TASKFORGE_RECOVERY_INTERVAL` | `5s` | `100ms..5m` | Expired-lease scan frequency. |
 | `TASKFORGE_RECOVERY_BATCH_SIZE` | `100` | `1..1000` | Rows recovered per transaction. |
+| `TASKFORGE_SCHEDULE_INTERVAL` | `1s` | `100ms..1m` | Due-schedule scan frequency. |
+| `TASKFORGE_SCHEDULE_BATCH_SIZE` | `50` | `1..500` | Due schedules dispatched per transaction. |
 
 ## Retry policy
 

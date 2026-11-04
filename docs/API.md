@@ -1,7 +1,7 @@
-# TaskForge HTTP API reference (v0.3)
+# TaskForge HTTP API reference (v0.4)
 
 Base URL in development: `http://127.0.0.1:8080`. All request and response
-bodies are JSON. There is no authentication in v0.3; do not expose the API to
+bodies are JSON. There is no authentication in v0.4; do not expose the API to
 untrusted networks.
 
 ## Conventions
@@ -68,6 +68,7 @@ Returned by every job endpoint and by redrive.
 | `started_at`, `completed_at`, `last_error_code` | Omitted when null. |
 | `has_result`, `result_bytes` | The result body itself is never returned. `result_bytes` is omitted when 0. |
 | `dead_lettered` | `true` once the job has a dead-letter record. |
+| `schedule_id`, `scheduled_for` | Included when the job was materialized by a recurring schedule. |
 
 Never returned: `payload`, `result`, `idempotency_key`, execution key, lease
 owner, fencing token.
@@ -85,6 +86,8 @@ Request:
 | `payload` | object | yes | JSON object, valid UTF-8, ≤ payload limit after canonicalization. |
 | `priority` | integer | no | `-100..100`, default 0. |
 | `idempotency_key` | string | no | 1–128 printable ASCII characters (`0x21–0x7E`), no spaces. |
+| `run_at` | RFC3339 timestamp | no | Earliest execution time (≤ 30 days ahead). Mutually exclusive with `delay_seconds`. |
+| `delay_seconds` | integer | no | `0..2592000` (30 days), added to PostgreSQL `NOW()`. Mutually exclusive with `run_at`. |
 
 Responses:
 
@@ -169,6 +172,44 @@ are checked.
 `200 {"status":"ready"}` if a PostgreSQL ping succeeds within
 `TASKFORGE_DATABASE_QUERY_TIMEOUT`; otherwise `503 DEPENDENCY_UNAVAILABLE`.
 
+### `POST /v1/schedules` — create a recurring schedule
+
+| Field | Type | Required | Rules |
+| --- | --- | --- | --- |
+| `name` | string | yes | Unique identifier (`^[a-z0-9][a-z0-9._-]{0,63}$`); also scopes creation idempotency. |
+| `queue` | string | no | Default `default`. |
+| `kind` | string | yes | Handler identifier. |
+| `payload` | object | yes | JSON object within payload limit. Never returned on read. |
+| `priority` | integer | no | `-100..100`, default 0. |
+| `cron_expr` | string | yes | Standard 5-field POSIX cron (`minute hour day-of-month month day-of-week`). |
+| `timezone` | string | no | Default `UTC`. Valid IANA timezone name (e.g. `Asia/Jakarta`). |
+| `paused` | boolean | no | Default `false`. |
+
+Returns `201 Created` on first creation, `200 OK` on identical replay for the
+same `name`, and `409 IDEMPOTENCY_CONFLICT` if `name` is reused with different
+fields.
+
+### `GET /v1/schedules` — list schedules
+
+Supports `limit` (`1..TASKFORGE_DEAD_LETTER_PAGE_SIZE`) and `cursor` ordered by
+`(created_at DESC, id DESC)`.
+
+### `GET /v1/schedules/{id}` — get a schedule
+
+`200 OK` with the schedule resource; `400 INVALID_SCHEDULE_ID`;
+`404 SCHEDULE_NOT_FOUND`.
+
+### `POST /v1/schedules/{id}/pause` and `POST /v1/schedules/{id}/resume`
+
+Idempotently pauses or resumes a schedule (`200 OK`). Resuming a schedule whose
+`next_run_at` is in the past advances `next_run_at` to the next tick after
+PostgreSQL `NOW()`.
+
+### `DELETE /v1/schedules/{id}` — delete a schedule
+
+`204 No Content`, or `404 SCHEDULE_NOT_FOUND`. Historical jobs materialized by
+the schedule are preserved with `schedule_id = NULL`.
+
 ## Error code catalog
 
 | HTTP | Code | Meaning |
@@ -176,10 +217,12 @@ are checked.
 | 400 | `INVALID_REQUEST_ID` | `X-Request-ID` is malformed. |
 | 400 | `INVALID_JSON` | Body is not exactly one valid JSON object with known fields. |
 | 400 | `VALIDATION_FAILED` | A field violates its rules. |
-| 400 | `INVALID_JOB_ID` | Path ID is not a UUID. |
+| 400 | `INVALID_JOB_ID` | Path job ID is not a UUID. |
+| 400 | `INVALID_SCHEDULE_ID` | Path schedule ID is not a UUID. |
 | 400 | `INVALID_QUERY` | Unsupported, repeated, or out-of-range query parameter. |
 | 400 | `INVALID_CURSOR` | Cursor cannot be decoded. |
 | 404 | `JOB_NOT_FOUND` | Job or dead letter does not exist. |
+| 404 | `SCHEDULE_NOT_FOUND` | Schedule does not exist. |
 | 404 | `ROUTE_NOT_FOUND` | Unknown path. |
 | 405 | `METHOD_NOT_ALLOWED` | Known path, wrong method. |
 | 409 | `JOB_STATE_CONFLICT` | Operation not allowed in the current state. |

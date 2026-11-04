@@ -13,9 +13,12 @@ import (
 )
 
 const (
-	DefaultQueue = "default"
-	MinPriority  = -100
-	MaxPriority  = 100
+	DefaultQueue       = "default"
+	DefaultTimezone    = "UTC"
+	MinPriority        = -100
+	MaxPriority        = 100
+	MaxDelaySeconds    = 30 * 24 * 60 * 60
+	MaxScheduleHorizon = 30 * 24 * time.Hour
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -46,6 +49,8 @@ type Job struct {
 	MaxBackoff     time.Duration
 	JitterPercent  int
 	DeadLetteredAt *time.Time
+	ScheduleID     *string
+	ScheduledFor   *time.Time
 }
 
 // Execution identifies one ownership epoch. Its values must accompany every
@@ -85,10 +90,16 @@ type Submission struct {
 	Payload        json.RawMessage
 	Priority       int16
 	IdempotencyKey *string
+	RunAt          *time.Time
+	DelaySeconds   *int
 	Fingerprint    [sha256.Size]byte
 }
 
 func NewSubmission(queue, kind string, payload json.RawMessage, priority int, idempotencyKey *string, maxPayloadBytes int64) (Submission, error) {
+	return NewDelayedSubmission(queue, kind, payload, priority, idempotencyKey, nil, nil, time.Now(), maxPayloadBytes)
+}
+
+func NewDelayedSubmission(queue, kind string, payload json.RawMessage, priority int, idempotencyKey *string, runAt *time.Time, delaySeconds *int, now time.Time, maxPayloadBytes int64) (Submission, error) {
 	if queue == "" {
 		queue = DefaultQueue
 	}
@@ -106,17 +117,49 @@ func NewSubmission(queue, kind string, payload json.RawMessage, priority int, id
 			return Submission{}, err
 		}
 	}
+	if runAt != nil && delaySeconds != nil {
+		return Submission{}, errors.New("run_at and delay_seconds are mutually exclusive")
+	}
+	var normalizedRunAt *time.Time
+	var normalizedRunAtStr string
+	if runAt != nil {
+		utc := runAt.UTC().Truncate(time.Microsecond)
+		minTime := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+		if utc.Before(minTime) || utc.After(now.UTC().Add(MaxScheduleHorizon)) {
+			return Submission{}, errors.New("run_at must be within the allowed schedule horizon")
+		}
+		normalizedRunAt = &utc
+		normalizedRunAtStr = utc.Format(time.RFC3339Nano)
+	}
+	var normalizedDelay *int
+	if delaySeconds != nil {
+		if *delaySeconds < 0 || *delaySeconds > MaxDelaySeconds {
+			return Submission{}, fmt.Errorf("delay_seconds must be between 0 and %d", MaxDelaySeconds)
+		}
+		delayCopy := *delaySeconds
+		normalizedDelay = &delayCopy
+	}
 	canonicalPayload, err := canonicalObject(payload, maxPayloadBytes)
 	if err != nil {
 		return Submission{}, err
 	}
-	submission := Submission{Queue: queue, Kind: kind, Payload: canonicalPayload, Priority: int16(priority), IdempotencyKey: idempotencyKey}
+	submission := Submission{
+		Queue:          queue,
+		Kind:           kind,
+		Payload:        canonicalPayload,
+		Priority:       int16(priority),
+		IdempotencyKey: idempotencyKey,
+		RunAt:          normalizedRunAt,
+		DelaySeconds:   normalizedDelay,
+	}
 	fingerprintInput, err := json.Marshal(struct {
-		Queue    string          `json:"queue"`
-		Kind     string          `json:"kind"`
-		Payload  json.RawMessage `json:"payload"`
-		Priority int16           `json:"priority"`
-	}{submission.Queue, submission.Kind, submission.Payload, submission.Priority})
+		Queue        string          `json:"queue"`
+		Kind         string          `json:"kind"`
+		Payload      json.RawMessage `json:"payload"`
+		Priority     int16           `json:"priority"`
+		RunAt        string          `json:"run_at,omitempty"`
+		DelaySeconds *int            `json:"delay_seconds,omitempty"`
+	}{submission.Queue, submission.Kind, submission.Payload, submission.Priority, normalizedRunAtStr, submission.DelaySeconds})
 	if err != nil {
 		return Submission{}, fmt.Errorf("encode submission fingerprint: %w", err)
 	}

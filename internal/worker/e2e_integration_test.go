@@ -114,6 +114,82 @@ func TestEchoEndToEndIntegration(t *testing.T) {
 	}
 }
 
+func TestRecurringScheduleEndToEndIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := isolatedURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := migrations.Run(ctx, databaseURL); err != nil {
+		t.Fatal("apply migrations")
+	}
+	cfg := config.Config{
+		DatabaseURL: databaseURL, DatabaseMaxConns: 5, DatabaseMinConns: 0,
+		DatabaseConnectTimeout: 5 * time.Second, DatabaseQueryTimeout: 2 * time.Second,
+		JobPayloadMaxBytes: 64 * 1024, JobResultMaxBytes: 64 * 1024,
+	}
+	store, err := postgres.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal("open store")
+	}
+	defer store.Close()
+	api := httpapi.New(store, cfg.JobPayloadMaxBytes, time.Second)
+
+	createdResp := performJSON(api, http.MethodPost, "/v1/schedules",
+		`{"name":"e2e.tick","kind":"demo.echo","payload":{"message":"scheduled"},"cron_expr":"* * * * *","timezone":"UTC"}`)
+	if createdResp.Code != http.StatusCreated {
+		t.Fatalf("create schedule status=%d body=%s", createdResp.Code, createdResp.Body.String())
+	}
+	var createdSchedule struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(createdResp.Body.Bytes(), &createdSchedule); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `UPDATE schedules SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = $1`, createdSchedule.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, stopWorker := context.WithCancel(context.Background())
+	runner := worker.New(store, worker.NewRegistry(cfg.JobResultMaxBytes),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), worker.Options{
+			WorkerID: "e2e-schedule-worker", Concurrency: 2, PollInterval: 5 * time.Millisecond,
+			ExecutionTimeout: time.Second, ShutdownTimeout: time.Second,
+			LeaseDuration: 2 * time.Second, HeartbeatInterval: 200 * time.Millisecond,
+			RecoveryInterval: 100 * time.Millisecond, RecoveryBatchSize: 10,
+			ScheduleInterval: 10 * time.Millisecond, ScheduleBatchSize: 10,
+		})
+	workerDone := make(chan error, 1)
+	go func() { workerDone <- runner.Run(runCtx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sched, err := store.GetSchedule(ctx, createdSchedule.ID)
+		if err == nil && sched.LastJobID != nil {
+			found, err := store.GetJob(ctx, *sched.LastJobID)
+			if err == nil && found.Status == job.StatusSucceeded {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scheduled job did not reach succeeded before deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stopWorker()
+	if err := <-workerDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func performJSON(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")

@@ -16,11 +16,13 @@ import (
 )
 
 type fakeStore struct {
-	created bool
-	err     error
-	value   job.Job
-	letters []job.DeadLetter
-	hasMore bool
+	created   bool
+	err       error
+	value     job.Job
+	letters   []job.DeadLetter
+	schedules []job.Schedule
+	schedule  job.Schedule
+	hasMore   bool
 }
 
 func (f *fakeStore) CreateJob(context.Context, job.Submission) (job.Job, bool, error) {
@@ -65,6 +67,86 @@ func TestDeadLetterAPIPrivacyPaginationAndRedrive(t *testing.T) {
 func (f *fakeStore) RedriveDeadLetter(context.Context, string) (job.Job, bool, error) {
 	return f.value, f.created, f.err
 }
+func (f *fakeStore) CreateSchedule(context.Context, job.ScheduleSubmission) (job.Schedule, bool, error) {
+	return f.schedule, f.created, f.err
+}
+func (f *fakeStore) GetSchedule(context.Context, string) (job.Schedule, error) {
+	return f.schedule, f.err
+}
+func (f *fakeStore) ListSchedules(context.Context, *time.Time, string, int) ([]job.Schedule, bool, error) {
+	return f.schedules, f.hasMore, f.err
+}
+func (f *fakeStore) SetSchedulePaused(_ context.Context, _ string, paused bool) (job.Schedule, error) {
+	out := f.schedule
+	out.Paused = paused
+	return out, f.err
+}
+func (f *fakeStore) DeleteSchedule(context.Context, string) error {
+	return f.err
+}
+
+func TestScheduleAPICreateListPauseResumeDeleteAndPrivacy(t *testing.T) {
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	sched := job.Schedule{
+		ID:        id,
+		Name:      "hourly.echo",
+		Queue:     "default",
+		Kind:      "demo.echo",
+		Payload:   json.RawMessage(`{"secret":"do-not-expose"}`),
+		CronExpr:  "0 * * * *",
+		Timezone:  "UTC",
+		NextRunAt: now.Add(time.Hour),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	store := &fakeStore{
+		created:   true,
+		schedule:  sched,
+		schedules: []job.Schedule{sched},
+		hasMore:   true,
+	}
+	handler := New(store, 1024, time.Second, 10)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(`{
+		"name":"hourly.echo","kind":"demo.echo","payload":{"message":"hello"},"cron_expr":"0 * * * *","timezone":"UTC"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp := httptest.NewRecorder()
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated || strings.Contains(createResp.Body.String(), "do-not-expose") {
+		t.Fatalf("create schedule status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	listResp := httptest.NewRecorder()
+	handler.ServeHTTP(listResp, httptest.NewRequest(http.MethodGet, "/v1/schedules?limit=1", nil))
+	if listResp.Code != http.StatusOK || !strings.Contains(listResp.Body.String(), "next_cursor") || strings.Contains(listResp.Body.String(), "do-not-expose") {
+		t.Fatalf("list schedules status=%d body=%s", listResp.Code, listResp.Body.String())
+	}
+
+	getResp := httptest.NewRecorder()
+	handler.ServeHTTP(getResp, httptest.NewRequest(http.MethodGet, "/v1/schedules/"+id, nil))
+	if getResp.Code != http.StatusOK || strings.Contains(getResp.Body.String(), "do-not-expose") {
+		t.Fatalf("get schedule status=%d body=%s", getResp.Code, getResp.Body.String())
+	}
+
+	pauseResp := httptest.NewRecorder()
+	handler.ServeHTTP(pauseResp, httptest.NewRequest(http.MethodPost, "/v1/schedules/"+id+"/pause", nil))
+	if pauseResp.Code != http.StatusOK || !strings.Contains(pauseResp.Body.String(), `"paused":true`) {
+		t.Fatalf("pause schedule status=%d body=%s", pauseResp.Code, pauseResp.Body.String())
+	}
+
+	resumeResp := httptest.NewRecorder()
+	handler.ServeHTTP(resumeResp, httptest.NewRequest(http.MethodPost, "/v1/schedules/"+id+"/resume", nil))
+	if resumeResp.Code != http.StatusOK || !strings.Contains(resumeResp.Body.String(), `"paused":false`) {
+		t.Fatalf("resume schedule status=%d body=%s", resumeResp.Code, resumeResp.Body.String())
+	}
+
+	delResp := httptest.NewRecorder()
+	handler.ServeHTTP(delResp, httptest.NewRequest(http.MethodDelete, "/v1/schedules/"+id, nil))
+	if delResp.Code != http.StatusNoContent {
+		t.Fatalf("delete schedule status=%d", delResp.Code)
+	}
+}
 
 func TestSubmitStatusAndPrivacy(t *testing.T) {
 	id := uuid.NewString()
@@ -97,6 +179,7 @@ func TestSubmitRejectsInvalidRequests(t *testing.T) {
 		{name: "content encoding", contentType: "application/json", contentEncoding: "gzip", body: `{}`, status: http.StatusUnsupportedMediaType},
 		{name: "unknown field", contentType: "application/json", body: `{"kind":"demo.echo","payload":{},"extra":true}`, status: http.StatusBadRequest},
 		{name: "multiple values", contentType: "application/json", body: `{} {}`, status: http.StatusBadRequest},
+		{name: "both run_at and delay_seconds", contentType: "application/json", body: `{"kind":"demo.echo","payload":{},"run_at":"2026-11-05T10:00:00Z","delay_seconds":10}`, status: http.StatusBadRequest},
 		{name: "oversized", contentType: "application/json", body: `{"kind":"demo.echo","payload":{"message":"` + strings.Repeat("x", 5000) + `"}}`, status: http.StatusRequestEntityTooLarge},
 	}
 	for _, tt := range tests {

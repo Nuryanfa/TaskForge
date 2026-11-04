@@ -16,7 +16,8 @@ var environmentKeys = []string{
 	"TASKFORGE_JOB_RESULT_MAX_BYTES",
 	"TASKFORGE_WORKER_CONCURRENCY", "TASKFORGE_JOB_LEASE_DURATION",
 	"TASKFORGE_JOB_HEARTBEAT_INTERVAL", "TASKFORGE_RECOVERY_INTERVAL",
-	"TASKFORGE_RECOVERY_BATCH_SIZE",
+	"TASKFORGE_RECOVERY_BATCH_SIZE", "TASKFORGE_SCHEDULE_INTERVAL",
+	"TASKFORGE_SCHEDULE_BATCH_SIZE",
 	"TASKFORGE_JOB_MAX_ATTEMPTS", "TASKFORGE_RETRY_INITIAL_BACKOFF",
 	"TASKFORGE_RETRY_MAX_BACKOFF", "TASKFORGE_RETRY_JITTER_PERCENT",
 	"TASKFORGE_DEAD_LETTER_PAGE_SIZE",
@@ -40,7 +41,8 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.WorkerConcurrency != 4 || cfg.JobLeaseDuration != 30*time.Second ||
 		cfg.JobHeartbeatInterval != 10*time.Second || cfg.RecoveryInterval != 5*time.Second ||
-		cfg.RecoveryBatchSize != 100 {
+		cfg.RecoveryBatchSize != 100 || cfg.ScheduleInterval != time.Second ||
+		cfg.ScheduleBatchSize != 50 {
 		t.Fatalf("unexpected worker defaults: %+v", cfg)
 	}
 	if cfg.JobMaxAttempts != 3 || cfg.RetryInitialBackoff != time.Second || cfg.RetryMaxBackoff != time.Minute || cfg.RetryJitterPercent != 20 || cfg.DeadLetterPageSize != 50 {
@@ -64,7 +66,8 @@ func TestLoadValidOverrides(t *testing.T) {
 		"TASKFORGE_JOB_PAYLOAD_MAX_BYTES": "2048", "TASKFORGE_JOB_RESULT_MAX_BYTES": "4096",
 		"TASKFORGE_WORKER_CONCURRENCY": "8", "TASKFORGE_JOB_LEASE_DURATION": "12s",
 		"TASKFORGE_JOB_HEARTBEAT_INTERVAL": "3s", "TASKFORGE_RECOVERY_INTERVAL": "4s",
-		"TASKFORGE_RECOVERY_BATCH_SIZE": "25",
+		"TASKFORGE_RECOVERY_BATCH_SIZE": "25", "TASKFORGE_SCHEDULE_INTERVAL": "2s",
+		"TASKFORGE_SCHEDULE_BATCH_SIZE": "30",
 		"TASKFORGE_JOB_MAX_ATTEMPTS":    "7", "TASKFORGE_RETRY_INITIAL_BACKOFF": "2s",
 		"TASKFORGE_RETRY_MAX_BACKOFF": "20s", "TASKFORGE_RETRY_JITTER_PERCENT": "15",
 		"TASKFORGE_DEAD_LETTER_PAGE_SIZE": "25",
@@ -84,7 +87,8 @@ func TestLoadValidOverrides(t *testing.T) {
 	}
 	if cfg.WorkerConcurrency != 8 || cfg.JobLeaseDuration != 12*time.Second ||
 		cfg.JobHeartbeatInterval != 3*time.Second || cfg.RecoveryInterval != 4*time.Second ||
-		cfg.RecoveryBatchSize != 25 {
+		cfg.RecoveryBatchSize != 25 || cfg.ScheduleInterval != 2*time.Second ||
+		cfg.ScheduleBatchSize != 30 {
 		t.Fatalf("unexpected worker overrides: %+v", cfg)
 	}
 	if cfg.JobMaxAttempts != 7 || cfg.RetryInitialBackoff != 2*time.Second || cfg.RetryMaxBackoff != 20*time.Second || cfg.RetryJitterPercent != 15 || cfg.DeadLetterPageSize != 25 {
@@ -99,7 +103,7 @@ func TestLoadRejectsInvalidDurations(t *testing.T) {
 		"TASKFORGE_IDLE_TIMEOUT", "TASKFORGE_SHUTDOWN_TIMEOUT",
 		"TASKFORGE_WORKER_POLL_INTERVAL", "TASKFORGE_JOB_EXECUTION_TIMEOUT",
 		"TASKFORGE_JOB_LEASE_DURATION", "TASKFORGE_JOB_HEARTBEAT_INTERVAL",
-		"TASKFORGE_RECOVERY_INTERVAL",
+		"TASKFORGE_RECOVERY_INTERVAL", "TASKFORGE_SCHEDULE_INTERVAL",
 		"TASKFORGE_RETRY_INITIAL_BACKOFF", "TASKFORGE_RETRY_MAX_BACKOFF",
 	}
 	for _, key := range keys {
@@ -127,6 +131,8 @@ func TestLoadRejectsInvalidCountsAndSizes(t *testing.T) {
 		{key: "TASKFORGE_WORKER_CONCURRENCY", value: "65"},
 		{key: "TASKFORGE_RECOVERY_BATCH_SIZE", value: "0"},
 		{key: "TASKFORGE_RECOVERY_BATCH_SIZE", value: "1001"},
+		{key: "TASKFORGE_SCHEDULE_BATCH_SIZE", value: "0"},
+		{key: "TASKFORGE_SCHEDULE_BATCH_SIZE", value: "501"},
 		{key: "TASKFORGE_JOB_MAX_ATTEMPTS", value: "0"}, {key: "TASKFORGE_JOB_MAX_ATTEMPTS", value: "101"},
 		{key: "TASKFORGE_RETRY_JITTER_PERCENT", value: "101"}, {key: "TASKFORGE_DEAD_LETTER_PAGE_SIZE", value: "101"},
 	}
@@ -151,7 +157,7 @@ func TestLoadRejectsInvalidCountsAndSizes(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("expected heartbeat/lease relationship error")
 	}
-	for _, key := range []string{"TASKFORGE_JOB_HEARTBEAT_INTERVAL", "TASKFORGE_RECOVERY_INTERVAL"} {
+	for _, key := range []string{"TASKFORGE_JOB_HEARTBEAT_INTERVAL", "TASKFORGE_RECOVERY_INTERVAL", "TASKFORGE_SCHEDULE_INTERVAL"} {
 		clearEnvironment(t)
 		t.Setenv(key, "50ms")
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {

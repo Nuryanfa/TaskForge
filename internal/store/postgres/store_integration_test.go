@@ -45,7 +45,7 @@ func integrationStore(t *testing.T) *Store {
 		t.Fatal("open integration store")
 	}
 	t.Cleanup(store.Close)
-	if _, err := store.pool.Exec(ctx, `TRUNCATE job_attempts, jobs RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := store.pool.Exec(ctx, `TRUNCATE job_attempts, jobs, schedules RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal("clean integration tables")
 	}
 	return store
@@ -658,5 +658,122 @@ func TestConcurrentFailureCreatesOneDeadLetterIntegration(t *testing.T) {
 	var count int
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM dead_letters WHERE job_id=$1`, created.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("dead letters=%d err=%v", count, err)
+	}
+}
+
+func TestDelayedJobClaimEligibilityAndCancellationIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	delay := 30
+	key := "delayed-key"
+	delayedSub, err := job.NewDelayedSubmission("default", "demo.echo", json.RawMessage(`{"message":"later"}`), 0, &key, nil, &delay, time.Now(), 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, isNew, err := store.CreateJob(ctx, delayedSub)
+	if err != nil || !isNew {
+		t.Fatalf("create delayed job: isNew=%v err=%v", isNew, err)
+	}
+	replayed, isNew, err := store.CreateJob(ctx, delayedSub)
+	if err != nil || isNew || replayed.ID != created.ID {
+		t.Fatalf("replay delayed job: isNew=%v err=%v", isNew, err)
+	}
+	if _, err := store.ClaimNextJob(ctx, "worker", time.Second); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("future delayed job should not be claimable yet: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET available_at = NOW() WHERE id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNextJob(ctx, "worker", time.Second)
+	if err != nil || claimed.Job.ID != created.ID {
+		t.Fatalf("claim due delayed job: %v", err)
+	}
+}
+
+func TestScheduleCreateReplayPauseResumeDeleteAndConcurrentDispatchIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	sub, err := job.NewScheduleSubmission("every.minute", "default", "demo.echo", json.RawMessage(`{"message":"tick"}`), 5, "* * * * *", "UTC", false, 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, isNew, err := store.CreateSchedule(ctx, sub)
+	if err != nil || !isNew {
+		t.Fatalf("create schedule: isNew=%v err=%v", isNew, err)
+	}
+	replayed, isNew, err := store.CreateSchedule(ctx, sub)
+	if err != nil || isNew || replayed.ID != created.ID {
+		t.Fatalf("replay schedule: isNew=%v err=%v", isNew, err)
+	}
+	conflictSub, err := job.NewScheduleSubmission("every.minute", "default", "demo.echo", json.RawMessage(`{"message":"different"}`), 5, "* * * * *", "UTC", false, 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateSchedule(ctx, conflictSub); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("expected schedule idempotency conflict, got %v", err)
+	}
+
+	if _, err := store.pool.Exec(ctx, `UPDATE schedules SET next_run_at = NOW() - INTERVAL '10 minutes' WHERE id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	const dispatchers = 6
+	counts := make(chan int, dispatchers)
+	errs := make(chan error, dispatchers)
+	var wait sync.WaitGroup
+	for range dispatchers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			c, err := store.DispatchDueSchedules(context.Background(), 10)
+			counts <- c
+			errs <- err
+		}()
+	}
+	wait.Wait()
+	close(counts)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	totalDispatched := 0
+	for c := range counts {
+		totalDispatched += c
+	}
+	if totalDispatched != 1 {
+		t.Fatalf("expected exactly 1 job dispatched across concurrent workers, got %d", totalDispatched)
+	}
+
+	updated, err := store.GetSchedule(ctx, created.ID)
+	if err != nil || updated.LastJobID == nil || updated.LastRunAt == nil || !updated.NextRunAt.After(time.Now().Add(-5*time.Second)) {
+		t.Fatalf("unexpected schedule state after dispatch: %+v err=%v", updated, err)
+	}
+	dispatchedJob, err := store.GetJob(ctx, *updated.LastJobID)
+	if err != nil || dispatchedJob.ScheduleID == nil || *dispatchedJob.ScheduleID != created.ID || dispatchedJob.ScheduledFor == nil {
+		t.Fatalf("unexpected dispatched job: %+v err=%v", dispatchedJob, err)
+	}
+
+	paused, err := store.SetSchedulePaused(ctx, created.ID, true)
+	if err != nil || !paused.Paused {
+		t.Fatalf("pause schedule: %+v err=%v", paused, err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE schedules SET next_run_at = NOW() - INTERVAL '5 minutes' WHERE id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := store.DispatchDueSchedules(ctx, 10); err != nil || c != 0 {
+		t.Fatalf("paused schedule should not dispatch: count=%d err=%v", c, err)
+	}
+	resumed, err := store.SetSchedulePaused(ctx, created.ID, false)
+	if err != nil || resumed.Paused || !resumed.NextRunAt.After(time.Now().Add(-5*time.Second)) {
+		t.Fatalf("resumed schedule should advance stale next_run_at into the future: %+v err=%v", resumed, err)
+	}
+
+	if err := store.DeleteSchedule(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	preservedJob, err := store.GetJob(ctx, dispatchedJob.ID)
+	if err != nil || preservedJob.ScheduleID != nil || preservedJob.ScheduledFor == nil {
+		t.Fatalf("expected historical job to survive schedule deletion with nil schedule_id and preserved scheduled_for: %+v err=%v", preservedJob, err)
 	}
 }

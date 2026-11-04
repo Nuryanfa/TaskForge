@@ -60,6 +60,8 @@ results, keys, and DSNs are never logged.
 | `worker_persist_outcome_failed` | error | W | Could not write success/failure; job will be recovered after lease expiry. |
 | `worker_recovery_failed` | error | W | Recovery transaction failed. |
 | `worker_jobs_recovered` | info | W | `count` expired leases were requeued or dead-lettered. Frequent occurrences mean crashes or a lease that is too short. |
+| `worker_schedule_dispatch_failed` | error | W | Recurring schedule dispatch transaction failed. |
+| `worker_schedules_dispatched` | info | W | `count` due schedules materialized into queued jobs. |
 
 ## Job failure codes
 

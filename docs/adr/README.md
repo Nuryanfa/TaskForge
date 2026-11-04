@@ -15,6 +15,7 @@ by reference instead of rewriting it.
 | [0007](0007-retry-classification-and-backoff.md) | Typed failures and bounded retry backoff | v0.3 | Accepted |
 | [0008](0008-execution-idempotency-contract.md) | Execution idempotency is a propagated contract | v0.3 | Accepted |
 | [0009](0009-dead-letter-storage-and-redrive.md) | Payload-free dead letters and immutable redrive | v0.3 | Accepted |
+| [0010](0010-delayed-jobs-and-recurring-schedules.md) | Delayed jobs and transactional recurring schedules | v0.4 | Accepted |
 
 ## Writing a new ADR
 

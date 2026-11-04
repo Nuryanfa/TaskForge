@@ -3,8 +3,8 @@
 ## Problem
 
 Applications need durable asynchronous work without hiding failure behavior.
-TaskForge v0.3 adds bounded retry scheduling, execution idempotency metadata,
-and dead-letter operations while keeping ownership and failure explicit.
+TaskForge v0.4 adds client-controlled delayed job execution and durable
+recurring cron schedules while keeping ownership, retry, and failure explicit.
 
 ## Product principles
 
@@ -14,12 +14,18 @@ and dead-letter operations while keeping ownership and failure explicit.
 4. Correctness-sensitive SQL is explicit and tested against real PostgreSQL.
 5. Payloads, results, idempotency keys, and database credentials are sensitive.
 
-## Implemented through v0.3
+## Implemented through v0.4
 
 - Embedded, versioned PostgreSQL migrations and a dedicated migration command.
 - Bounded `pgxpool` connection pooling and database operations.
 - Submit, inspect, and queued-job cancellation HTTP endpoints.
 - Queue-scoped creation idempotency using a canonical SHA-256 fingerprint.
+- Client-controlled delayed job scheduling via `run_at` or `delay_seconds`.
+- Durable recurring 5-field cron schedules with IANA timezone evaluation,
+  transactional `SKIP LOCKED` materialization, per-slot uniqueness, and
+  at-most-one catch-up ("skip missed").
+- Schedule creation, cursor-paginated listing, inspection, pause, resume, and
+  deletion HTTP endpoints without exposing payloads.
 - A fixed, bounded executor pool and transactional queued-to-running claims.
 - Time-bounded leases, periodic heartbeat renewal, and monotonically increasing
   fencing tokens.
@@ -39,14 +45,20 @@ and dead-letter operations while keeping ownership and failure explicit.
 ## API
 
 ```text
-POST /v1/jobs
-GET  /v1/jobs/{id}
-POST /v1/jobs/{id}/cancel
-GET  /v1/dead-letters
-GET  /v1/dead-letters/{job-id}
-POST /v1/dead-letters/{job-id}/redrive
-GET  /healthz
-GET  /readyz
+POST   /v1/jobs
+GET    /v1/jobs/{id}
+POST   /v1/jobs/{id}/cancel
+GET    /v1/dead-letters
+GET    /v1/dead-letters/{job-id}
+POST   /v1/dead-letters/{job-id}/redrive
+POST   /v1/schedules
+GET    /v1/schedules
+GET    /v1/schedules/{id}
+POST   /v1/schedules/{id}/pause
+POST   /v1/schedules/{id}/resume
+DELETE /v1/schedules/{id}
+GET    /healthz
+GET    /readyz
 ```
 
 The full contract, including request rules and error codes, is in
@@ -80,8 +92,8 @@ side effect and crash before persisting success; lease recovery may then run
 the handler again. Fencing protects TaskForge's PostgreSQL state only. Handler
 integrations need idempotency keys or downstream fencing for their own effects.
 
-v0.3 excludes client-controlled delayed or recurring jobs, NATS, workflow DAGs,
-authentication or multitenancy, Kubernetes, and full observability.
+v0.4 excludes NATS, workflow DAGs, authentication or multitenancy, Kubernetes,
+and full observability.
 
 ## Acceptance criteria
 
@@ -109,7 +121,7 @@ authentication or multitenancy, Kubernetes, and full observability.
 | v0.1 | Durable PostgreSQL API, migrations, and sequential worker |
 | v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery (implemented) |
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue (implemented) |
-| v0.4 | Delayed and recurring scheduling |
+| v0.4 | Delayed and recurring scheduling (implemented) |
 | v0.5 | Transactional outbox and NATS JetStream |
 | v0.6 | Workflow DAGs and saga compensation |
 | v0.7 | Metrics, tracing, dashboards, and SLOs |

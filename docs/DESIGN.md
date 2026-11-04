@@ -1,4 +1,4 @@
-# TaskForge system design (v0.3)
+# TaskForge system design (v0.4)
 
 This document describes how TaskForge is built: its components, package
 structure, concurrency model, the transactional protocols behind every job
@@ -12,6 +12,8 @@ contract see [API.md](API.md).
 Goals:
 
 - Durable job submission and state that survive process restarts and crashes.
+- Client-controlled delayed jobs (`run_at` / `delay_seconds`) and durable
+  recurring cron schedules with IANA timezone evaluation.
 - Safe cooperation of many worker processes without a coordinator other than
   PostgreSQL.
 - Explicit, documented delivery semantics: **at least once**.
@@ -20,9 +22,9 @@ Goals:
 - No leakage of payloads, results, idempotency keys, or credentials through the
   public API or logs.
 
-Non-goals for v0.3: exactly-once execution, delayed/cron scheduling, message
-brokers, workflows, authentication, multi-tenancy, metrics/tracing, and
-execution of arbitrary user code.
+Non-goals for v0.4: exactly-once execution, message brokers, workflows,
+authentication, multi-tenancy, metrics/tracing, and execution of arbitrary user
+code.
 
 ## 2. Component view
 
@@ -270,6 +272,24 @@ sequenceDiagram
 The original job and its attempt history are never modified. The row lock on
 the dead letter serializes concurrent redrives so exactly one new job exists.
 
+### 5.6 Recurring schedule dispatch
+
+Each worker process runs one bounded schedule dispatcher loop every
+`TASKFORGE_SCHEDULE_INTERVAL`:
+
+1. `BEGIN`; select up to `TASKFORGE_SCHEDULE_BATCH_SIZE` unpaused rows with
+   `next_run_at <= NOW()` using `FOR UPDATE SKIP LOCKED`.
+2. For each due schedule, enqueue at most one `queued` job for
+   `(schedule_id, scheduled_for = next_run_at)` using
+   `ON CONFLICT (schedule_id, scheduled_for) WHERE schedule_id IS NOT NULL DO NOTHING`.
+3. Advance `next_run_at` to the next cron tick strictly after
+   `GREATEST(next_run_at, NOW())` in the schedule's IANA timezone, and record
+   `last_run_at` and `last_job_id`.
+4. `COMMIT`.
+
+Missed ticks while workers were down or while a schedule was paused coalesce
+into at most one catch-up job, preventing backlog floods.
+
 ## 6. Worker concurrency model
 
 ```mermaid
@@ -278,10 +298,11 @@ flowchart TB
     Run --> E2["executor …"]
     Run --> EN["executor N = TASKFORGE_WORKER_CONCURRENCY"]
     Run --> RL["recovery loop"]
+    Run --> SL["schedule dispatch loop"]
     E1 --> X["execute(): handler goroutine + heartbeat ticker"]
 ```
 
-- Exactly `Concurrency + 1` long-lived goroutines per process, plus at most one
+- Exactly `Concurrency + 2` long-lived goroutines per process, plus at most one
   handler goroutine per executor. There is no unbounded fan-out.
 - An executor that finds no eligible job sleeps `TASKFORGE_WORKER_POLL_INTERVAL`;
   after finishing a job it polls again immediately.

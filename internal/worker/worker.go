@@ -18,6 +18,7 @@ type Store interface {
 	CompleteJob(context.Context, job.Execution, json.RawMessage) error
 	FailJob(context.Context, job.Execution, job.Failure) error
 	RecoverExpiredJobs(context.Context, int) (int, error)
+	DispatchDueSchedules(context.Context, int) (int, error)
 }
 
 type Options struct {
@@ -30,6 +31,8 @@ type Options struct {
 	HeartbeatInterval time.Duration
 	RecoveryInterval  time.Duration
 	RecoveryBatchSize int
+	ScheduleInterval  time.Duration
+	ScheduleBatchSize int
 }
 
 type Runner struct {
@@ -40,14 +43,29 @@ type Runner struct {
 }
 
 func New(store Store, registry *Registry, logger *slog.Logger, options Options) *Runner {
+	if options.ScheduleInterval <= 0 {
+		if options.RecoveryInterval > 0 {
+			options.ScheduleInterval = options.RecoveryInterval
+		} else {
+			options.ScheduleInterval = time.Second
+		}
+	}
+	if options.ScheduleBatchSize <= 0 {
+		if options.RecoveryBatchSize > 0 {
+			options.ScheduleBatchSize = options.RecoveryBatchSize
+		} else {
+			options.ScheduleBatchSize = 50
+		}
+	}
 	return &Runner{store: store, registry: registry, logger: logger, options: options}
 }
 
-// Run starts a fixed-size executor pool and one bounded recovery loop. No job
-// can create more than one handler and one heartbeat goroutine-equivalent loop.
+// Run starts a fixed-size executor pool, one bounded recovery loop, and one
+// bounded schedule dispatch loop. No job can create more than one handler and
+// one heartbeat goroutine-equivalent loop.
 func (r *Runner) Run(ctx context.Context) error {
 	var wait sync.WaitGroup
-	wait.Add(r.options.Concurrency + 1)
+	wait.Add(r.options.Concurrency + 2)
 	for slot := 0; slot < r.options.Concurrency; slot++ {
 		go func() {
 			defer wait.Done()
@@ -57,6 +75,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	go func() {
 		defer wait.Done()
 		r.runRecovery(ctx)
+	}()
+	go func() {
+		defer wait.Done()
+		r.runScheduler(ctx)
 	}()
 	wait.Wait()
 	return nil
@@ -106,6 +128,25 @@ func (r *Runner) runRecovery(ctx context.Context) {
 			r.logger.Info("worker_jobs_recovered", "count", recovered)
 		}
 		resetTimer(timer, r.options.RecoveryInterval)
+	}
+}
+
+func (r *Runner) runScheduler(ctx context.Context) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		dispatched, err := r.store.DispatchDueSchedules(ctx, r.options.ScheduleBatchSize)
+		if err != nil && ctx.Err() == nil {
+			r.logger.Error("worker_schedule_dispatch_failed")
+		} else if dispatched > 0 {
+			r.logger.Info("worker_schedules_dispatched", "count", dispatched)
+		}
+		resetTimer(timer, r.options.ScheduleInterval)
 	}
 }
 
