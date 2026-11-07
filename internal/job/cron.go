@@ -317,4 +317,3 @@ func parseCronValue(raw string, minVal, maxVal int, allowSevenSunday bool) (int,
 	}
 	return val, nil
 }
-
