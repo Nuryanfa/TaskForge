@@ -39,6 +39,15 @@ const (
 	defaultRetryMaxBackoff              = time.Minute
 	defaultRetryJitterPercent           = 20
 	defaultDeadLetterPageSize           = 50
+	defaultNATSConnectTimeout           = 5 * time.Second
+	defaultNATSPublishTimeout           = 2 * time.Second
+	defaultNATSStream                   = "TASKFORGE_EVENTS"
+	defaultNATSStreamMaxAge             = 7 * 24 * time.Hour
+	defaultNATSDuplicateWindow          = 2 * time.Minute
+	defaultOutboxPollInterval           = 200 * time.Millisecond
+	defaultOutboxBatchSize              = 100
+	defaultOutboxBatchTimeout           = 10 * time.Second
+	defaultOutboxRetention              = 24 * time.Hour
 	maximumConnectionCount              = 100
 	maximumNetworkTimeout               = 5 * time.Minute
 	maximumJobExecutionTimeout          = 30 * time.Minute
@@ -53,10 +62,21 @@ const (
 	maximumJobAttempts                  = 100
 	maximumRetryBackoff                 = 30 * time.Minute
 	maximumDeadLetterPageSize           = 100
+	minimumNATSStreamMaxAge             = time.Minute
+	maximumNATSStreamMaxAge             = 365 * 24 * time.Hour
+	minimumNATSDuplicateWindow          = time.Second
+	maximumNATSDuplicateWindow          = time.Hour
+	minimumOutboxPollInterval           = 10 * time.Millisecond
+	maximumOutboxBatchSize              = 1000
+	minimumOutboxRetention              = time.Minute
+	maximumOutboxRetention              = 30 * 24 * time.Hour
 	maximumJobDataBytes           int64 = 1024 * 1024
 )
 
-var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var (
+	workerIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	natsStreamPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+)
 
 type Config struct {
 	HTTPAddr               string
@@ -87,6 +107,16 @@ type Config struct {
 	RetryMaxBackoff        time.Duration
 	RetryJitterPercent     int
 	DeadLetterPageSize     int
+	NATSURL                string
+	NATSConnectTimeout     time.Duration
+	NATSPublishTimeout     time.Duration
+	NATSStream             string
+	NATSStreamMaxAge       time.Duration
+	NATSDuplicateWindow    time.Duration
+	OutboxPollInterval     time.Duration
+	OutboxBatchSize        int
+	OutboxBatchTimeout     time.Duration
+	OutboxRetention        time.Duration
 }
 
 func Load() (Config, error) {
@@ -119,10 +149,28 @@ func Load() (Config, error) {
 		RetryMaxBackoff:        defaultRetryMaxBackoff,
 		RetryJitterPercent:     defaultRetryJitterPercent,
 		DeadLetterPageSize:     defaultDeadLetterPageSize,
+		NATSURL:                os.Getenv("TASKFORGE_NATS_URL"),
+		NATSConnectTimeout:     defaultNATSConnectTimeout,
+		NATSPublishTimeout:     defaultNATSPublishTimeout,
+		NATSStream:             valueOrDefault("TASKFORGE_NATS_STREAM", defaultNATSStream),
+		NATSStreamMaxAge:       defaultNATSStreamMaxAge,
+		NATSDuplicateWindow:    defaultNATSDuplicateWindow,
+		OutboxPollInterval:     defaultOutboxPollInterval,
+		OutboxBatchSize:        defaultOutboxBatchSize,
+		OutboxBatchTimeout:     defaultOutboxBatchTimeout,
+		OutboxRetention:        defaultOutboxRetention,
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {
 		return Config{}, err
+	}
+	if cfg.NATSURL != "" {
+		if err := validateNATSURL(cfg.NATSURL); err != nil {
+			return Config{}, err
+		}
+	}
+	if !natsStreamPattern.MatchString(cfg.NATSStream) {
+		return Config{}, errors.New("TASKFORGE_NATS_STREAM must be 1-64 letters, digits, '_' or '-'")
 	}
 	durations := []struct {
 		key     string
@@ -144,6 +192,13 @@ func Load() (Config, error) {
 		{key: "TASKFORGE_SCHEDULE_INTERVAL", target: &cfg.ScheduleInterval, maximum: maximumWorkerPollInterval},
 		{key: "TASKFORGE_RETRY_INITIAL_BACKOFF", target: &cfg.RetryInitialBackoff, maximum: maximumRetryBackoff},
 		{key: "TASKFORGE_RETRY_MAX_BACKOFF", target: &cfg.RetryMaxBackoff, maximum: maximumRetryBackoff},
+		{key: "TASKFORGE_NATS_CONNECT_TIMEOUT", target: &cfg.NATSConnectTimeout, maximum: maximumNetworkTimeout},
+		{key: "TASKFORGE_NATS_PUBLISH_TIMEOUT", target: &cfg.NATSPublishTimeout, maximum: maximumNetworkTimeout},
+		{key: "TASKFORGE_NATS_STREAM_MAX_AGE", target: &cfg.NATSStreamMaxAge, maximum: maximumNATSStreamMaxAge},
+		{key: "TASKFORGE_NATS_DUPLICATE_WINDOW", target: &cfg.NATSDuplicateWindow, maximum: maximumNATSDuplicateWindow},
+		{key: "TASKFORGE_OUTBOX_POLL_INTERVAL", target: &cfg.OutboxPollInterval, maximum: maximumWorkerPollInterval},
+		{key: "TASKFORGE_OUTBOX_BATCH_TIMEOUT", target: &cfg.OutboxBatchTimeout, maximum: maximumNetworkTimeout},
+		{key: "TASKFORGE_OUTBOX_RETENTION", target: &cfg.OutboxRetention, maximum: maximumOutboxRetention},
 	}
 	for _, duration := range durations {
 		value, err := durationFromEnv(duration.key, *duration.target, duration.maximum)
@@ -163,6 +218,24 @@ func Load() (Config, error) {
 	}
 	if cfg.ScheduleInterval < minimumWorkerInterval {
 		return Config{}, fmt.Errorf("TASKFORGE_SCHEDULE_INTERVAL must be at least %s", minimumWorkerInterval)
+	}
+	minimums := []struct {
+		key     string
+		value   time.Duration
+		minimum time.Duration
+	}{
+		{key: "TASKFORGE_NATS_STREAM_MAX_AGE", value: cfg.NATSStreamMaxAge, minimum: minimumNATSStreamMaxAge},
+		{key: "TASKFORGE_NATS_DUPLICATE_WINDOW", value: cfg.NATSDuplicateWindow, minimum: minimumNATSDuplicateWindow},
+		{key: "TASKFORGE_OUTBOX_POLL_INTERVAL", value: cfg.OutboxPollInterval, minimum: minimumOutboxPollInterval},
+		{key: "TASKFORGE_OUTBOX_RETENTION", value: cfg.OutboxRetention, minimum: minimumOutboxRetention},
+	}
+	for _, check := range minimums {
+		if check.value < check.minimum {
+			return Config{}, fmt.Errorf("%s must be at least %s", check.key, check.minimum)
+		}
+	}
+	if cfg.NATSDuplicateWindow > cfg.NATSStreamMaxAge {
+		return Config{}, errors.New("TASKFORGE_NATS_DUPLICATE_WINDOW must not exceed TASKFORGE_NATS_STREAM_MAX_AGE")
 	}
 	if cfg.JobHeartbeatInterval >= cfg.JobLeaseDuration {
 		return Config{}, errors.New("TASKFORGE_JOB_HEARTBEAT_INTERVAL must be shorter than TASKFORGE_JOB_LEASE_DURATION")
@@ -213,6 +286,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	cfg.OutboxBatchSize, err = intFromEnv("TASKFORGE_OUTBOX_BATCH_SIZE", cfg.OutboxBatchSize, 1, maximumOutboxBatchSize)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg.JobPayloadMaxBytes, err = int64FromEnv("TASKFORGE_JOB_PAYLOAD_MAX_BYTES", cfg.JobPayloadMaxBytes, 1, maximumJobDataBytes)
 	if err != nil {
 		return Config{}, err
@@ -241,6 +319,26 @@ func (c Config) RequireWorker() error {
 	}
 	if !workerIDPattern.MatchString(c.WorkerID) {
 		return errors.New("TASKFORGE_WORKER_ID must be 1-64 safe identifier characters")
+	}
+	return nil
+}
+
+// RequireRelay validates what the outbox relay needs: PostgreSQL and NATS.
+func (c Config) RequireRelay() error {
+	if err := c.RequireDatabase(); err != nil {
+		return err
+	}
+	if c.NATSURL == "" {
+		return errors.New("TASKFORGE_NATS_URL is required")
+	}
+	return validateNATSURL(c.NATSURL)
+}
+
+// validateNATSURL never echoes the URL, which may contain credentials.
+func validateNATSURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "nats" && parsed.Scheme != "tls") || parsed.Hostname() == "" {
+		return errors.New("TASKFORGE_NATS_URL must be a nats:// or tls:// URL with a host")
 	}
 	return nil
 }

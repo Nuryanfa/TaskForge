@@ -6,17 +6,17 @@ process at startup with the log event `invalid_configuration` (the offending
 value is not logged). Durations use Go syntax such as `500ms`, `10s`, `2m`.
 
 Process legend: **A** = `taskforge-api`, **W** = `taskforge-worker`,
-**M** = `taskforge-migrate`.
+**M** = `taskforge-migrate`, **R** = `taskforge-relay`.
 
 ## Database
 
 | Variable | Default | Bounds | Used by | Notes |
 | --- | --- | --- | --- | --- |
-| `TASKFORGE_DATABASE_URL` | — (required) | `postgres://` or `postgresql://` with host and database | A W M | Never logged. |
-| `TASKFORGE_DATABASE_MAX_CONNS` | `10` | `1..100` | A W | `pgxpool` maximum. |
-| `TASKFORGE_DATABASE_MIN_CONNS` | `1` | `0..100`, ≤ max | A W | |
-| `TASKFORGE_DATABASE_CONNECT_TIMEOUT` | `5s` | `> 0`, ≤ `5m` | A W M | |
-| `TASKFORGE_DATABASE_QUERY_TIMEOUT` | `3s` | `> 0`, ≤ `5m` | A W M | Bounds each store call and `/readyz`. |
+| `TASKFORGE_DATABASE_URL` | — (required) | `postgres://` or `postgresql://` with host and database | A W M R | Never logged. |
+| `TASKFORGE_DATABASE_MAX_CONNS` | `10` | `1..100` | A W R | `pgxpool` maximum. |
+| `TASKFORGE_DATABASE_MIN_CONNS` | `1` | `0..100`, ≤ max | A W R | |
+| `TASKFORGE_DATABASE_CONNECT_TIMEOUT` | `5s` | `> 0`, ≤ `5m` | A W M R | |
+| `TASKFORGE_DATABASE_QUERY_TIMEOUT` | `3s` | `> 0`, ≤ `5m` | A W M R | Bounds each store call and `/readyz`. The relay's publish batch is bounded by `TASKFORGE_OUTBOX_BATCH_TIMEOUT` instead. |
 
 ## HTTP server (API)
 
@@ -52,6 +52,21 @@ Process legend: **A** = `taskforge-api`, **W** = `taskforge-worker`,
 | `TASKFORGE_SCHEDULE_INTERVAL` | `1s` | `100ms..1m` | Due-schedule scan frequency. |
 | `TASKFORGE_SCHEDULE_BATCH_SIZE` | `50` | `1..500` | Due schedules dispatched per transaction. |
 
+## NATS and outbox relay
+
+| Variable | Default | Bounds | Used by | Notes |
+| --- | --- | --- | --- | --- |
+| `TASKFORGE_NATS_URL` | unset | `nats://` or `tls://` with host | R (required), W (optional) | Unset on a worker means polling only. May contain credentials; never logged. |
+| `TASKFORGE_NATS_CONNECT_TIMEOUT` | `5s` | ≤ `5m` | R W | Per connection attempt; clients reconnect forever in the background. |
+| `TASKFORGE_NATS_PUBLISH_TIMEOUT` | `2s` | ≤ `5m` | R | Per event, and for stream setup. |
+| `TASKFORGE_NATS_STREAM` | `TASKFORGE_EVENTS` | `^[A-Za-z0-9_-]{1,64}$` | R | Stream bound to `taskforge.events.>`. |
+| `TASKFORGE_NATS_STREAM_MAX_AGE` | `168h` | `1m..8760h` | R | JetStream message retention. |
+| `TASKFORGE_NATS_DUPLICATE_WINDOW` | `2m` | `1s..1h`, ≤ max age | R | Window in which republished events are dropped by `Nats-Msg-Id`. |
+| `TASKFORGE_OUTBOX_POLL_INTERVAL` | `200ms` | `10ms..1m` | R | Wait after a non-full batch; also bounds wake-up latency. |
+| `TASKFORGE_OUTBOX_BATCH_SIZE` | `100` | `1..1000` | R | Events per publish transaction. |
+| `TASKFORGE_OUTBOX_BATCH_TIMEOUT` | `10s` | ≤ `5m` | R | Bounds one batch transaction including network publishes. Keep ≥ batch size × typical publish latency. |
+| `TASKFORGE_OUTBOX_RETENTION` | `24h` | `1m..720h` | R | Published rows older than this are purged; unpublished rows never are. |
+
 ## Retry policy
 
 These values are **snapshotted into each job when it is created**, so they take
@@ -71,6 +86,8 @@ original snapshot). Changing them affects only new jobs.
 | --- | --- | --- |
 | `TASKFORGE_POSTGRES_PORT` | `5432` | Host port mapped by `compose.yaml` (loopback only). |
 | `TASKFORGE_TEST_DATABASE_URL` | unset | Enables PostgreSQL integration tests; each test creates an isolated schema. |
+| `TASKFORGE_TEST_NATS_URL` | unset | Enables NATS JetStream integration and event end-to-end tests (also needs the database URL). |
+| `TASKFORGE_NATS_PORT` | `4222` | Host port for NATS mapped by `compose.yaml` (loopback only). |
 
 ## Tuning guidance
 

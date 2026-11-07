@@ -1,15 +1,16 @@
 # TaskForge
 
-TaskForge v0.4 is a durable PostgreSQL-backed background job platform written
+TaskForge v0.5 is a durable PostgreSQL-backed background job platform written
 in Go. It provides bounded leased execution, retry scheduling with deterministic
-jitter, stable execution idempotency keys, a PostgreSQL dead-letter queue, and
-client-controlled delayed and recurring cron scheduling.
+jitter, stable execution idempotency keys, a PostgreSQL dead-letter queue,
+client-controlled delayed and recurring cron scheduling, and job lifecycle
+events published to NATS JetStream through a transactional outbox.
 
 > TaskForge is an educational portfolio project. It is not production ready,
 > does not promise exactly-once execution, and must not be exposed directly to
 > an untrusted public network.
 
-## v0.4 architecture
+## v0.5 architecture
 
 ```mermaid
 flowchart LR
@@ -17,13 +18,24 @@ flowchart LR
     API --> DB[("PostgreSQL")]
     API -->|"inspect + redrive DLQ"| DB
     Migrator["taskforge-migrate"] --> DB
-    Worker -->|"claim + lease<br/>heartbeat + fenced outcome<br/>expired-lease recovery"| DB
+    Worker["taskforge-worker"] -->|"claim + lease<br/>heartbeat + fenced outcome<br/>expired-lease recovery"| DB
+    Relay["taskforge-relay"] -->|"read outbox"| DB
+    Relay -->|"publish events"| NATS[("NATS JetStream")]
+    NATS -.->|"job.queued wake-up"| Worker
+    NATS --> Consumers["event consumers"]
 ```
 
 PostgreSQL is the durable source of truth. The API and worker never run
 migrations automatically; `taskforge-migrate` applies embedded, versioned SQL
 migrations under a PostgreSQL advisory lock. Multiple worker processes can
 safely cooperate; each process has a fixed, configurable executor count.
+
+Every job insert or status change also writes an outbox row in the same
+transaction (via a database trigger). `taskforge-relay` publishes those rows to
+NATS JetStream in order with deduplication IDs, so an event exists if and only
+if its state change committed. Workers can use `job.queued` events as wake-up
+hints instead of waiting for the next poll; NATS never decides job ownership.
+See [docs/EVENTS.md](docs/EVENTS.md) for the event contract.
 
 ## Job lifecycle
 
@@ -60,9 +72,9 @@ Invoke-RestMethod http://127.0.0.1:8080/healthz
 Invoke-RestMethod http://127.0.0.1:8080/readyz
 ```
 
-Compose waits for PostgreSQL, runs the migration service to completion, then
-starts the API and worker. PostgreSQL and the API bind to loopback only. If host
-port 5432 is already in use:
+Compose waits for PostgreSQL and NATS, runs the migration service to
+completion, then starts the API, worker, and relay. PostgreSQL, NATS, and the
+API bind to loopback only. If host port 5432 is already in use:
 
 ```powershell
 $env:TASKFORGE_POSTGRES_PORT = "55432"
@@ -88,10 +100,17 @@ go run ./cmd/taskforge-api
 
 ```powershell
 $env:TASKFORGE_WORKER_ID = "local-worker-1"
+$env:TASKFORGE_NATS_URL = "nats://127.0.0.1:4222"   # optional: wake-ups
 go run ./cmd/taskforge-worker
 ```
 
-The API, worker, and migrator require `TASKFORGE_DATABASE_URL`. The worker also
+```powershell
+$env:TASKFORGE_NATS_URL = "nats://127.0.0.1:4222"
+go run ./cmd/taskforge-relay
+```
+
+All commands require `TASKFORGE_DATABASE_URL`. The relay also requires
+`TASKFORGE_NATS_URL` (a NATS server with JetStream enabled). The worker also
 requires a validated `TASKFORGE_WORKER_ID`; concurrency, lease, heartbeat, and
 recovery settings are documented in `.env.example`. Database URLs, payloads,
 results, and idempotency keys are never intentionally logged.
@@ -204,19 +223,23 @@ CI supplies a real PostgreSQL service and runs the suite with the race detector.
 
 ## Security limitations
 
-v0.4 has no authentication, authorization, TLS termination, multi-tenancy, or
-rate limiting. Bind it to loopback or a trusted development network only. Job
+v0.5 has no authentication, authorization, TLS termination, multi-tenancy, or
+rate limiting, and the Compose NATS server has no authentication. Bind it to loopback or a trusted development network only. Job
 payloads and results are potentially sensitive; the public GET API deliberately
 does not expose them. See [SECURITY.md](SECURITY.md).
 
-## Known v0.4 limitations
+## Known v0.5 limitations
 
 - Delivery is at least once; PostgreSQL fencing cannot fence external systems.
 - Retry is bounded but still at least once; redrive can execute logical work
   again and external systems must enforce execution idempotency.
 - Recurring schedules coalesce missed ticks into at most one catch-up run.
 - Retry policy is global per API process; no retention or archival.
-- No NATS, gRPC, workflows, Kubernetes, web UI, Prometheus, or OpenTelemetry.
+- Events are at least once and ordered per job only; consumers deduplicate by
+  `event_id`. Only job transitions produce events (not schedule changes).
+- One relay publishes at a time, synchronously (throughput is bounded by one
+  NATS round trip per event).
+- No gRPC, workflows, Kubernetes, web UI, Prometheus, or OpenTelemetry.
 - Submission idempotency does not guarantee idempotent execution side effects.
 
 ## Roadmap
@@ -227,7 +250,7 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery | Implemented |
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue | Implemented |
 | v0.4 | Delayed and recurring scheduling | Implemented |
-| v0.5 | Transactional outbox and NATS JetStream | Planned |
+| v0.5 | Transactional outbox and NATS JetStream | Implemented |
 | v0.6 | Workflow DAGs and saga compensation | Planned |
 | v0.7 | Metrics, tracing, dashboards, and SLOs | Planned |
 | v0.8 | High availability, Kubernetes, load, and chaos testing | Planned |
@@ -238,7 +261,7 @@ Start at the [documentation index](docs/README.md). Key documents:
 
 - [Product requirements](docs/PRD.md) and [current state](docs/CURRENT_STATE.md)
 - [System design](docs/DESIGN.md) and [data model](docs/DATA_MODEL.md)
-- [HTTP API reference](docs/API.md) and [configuration reference](docs/CONFIGURATION.md)
+- [HTTP API reference](docs/API.md), [event contract](docs/EVENTS.md), and [configuration reference](docs/CONFIGURATION.md)
 - [Operations guide](docs/OPERATIONS.md) and [testing strategy](docs/TESTING.md)
 - [Architecture decision records](docs/adr/README.md)
 

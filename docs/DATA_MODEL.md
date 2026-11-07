@@ -1,9 +1,9 @@
-# TaskForge data model (schema v4)
+# TaskForge data model (schema v5)
 
 PostgreSQL is the only durable store. The schema is defined by the embedded
 migrations in [`db/migrations`](../db/migrations) and applied by
 `taskforge-migrate` using goose. This document describes the schema after
-migration `000004`.
+migration `000005`.
 
 ## Entity relationships
 
@@ -13,6 +13,7 @@ erDiagram
     jobs ||--o{ job_attempts : "has attempts"
     jobs ||--o| dead_letters : "may be dead-lettered"
     dead_letters |o--o| jobs : "redriven_job_id → new job"
+    jobs ||--o{ outbox_events : "triggers record (no FK)"
 
     jobs {
         uuid id PK
@@ -154,6 +155,25 @@ No payloads, results, or keys are stored here by design (ADR 0009).
 | `last_job_id` | `UUID` | nullable, FK → `jobs.id` `ON DELETE SET NULL` | Most recently materialized job. |
 | `created_at`, `updated_at` | `TIMESTAMPTZ` | default `NOW()` | Audit timestamps. |
 
+## `outbox_events`
+
+Written only by the `taskforge_record_job_event()` trigger function, fired by
+`jobs_record_insert_event` (`AFTER INSERT`) and `jobs_record_status_event`
+(`AFTER UPDATE OF status`, only when the status changes). See
+[EVENTS.md](EVENTS.md) for the published contract.
+
+| Column | Type | Constraints | Purpose |
+| --- | --- | --- | --- |
+| `id` | `BIGINT` | identity PK | Event ID; per-job strictly increasing in transition order. |
+| `job_id` | `UUID` | NOT NULL, **no FK** | Job the event describes; events may outlive job retention. |
+| `event_type` | `TEXT` | one of six `job.*` types | Transition that occurred. |
+| `payload` | `JSONB` | object | Privacy-safe job snapshot (no payload, result, keys, or owner). |
+| `created_at` | `TIMESTAMPTZ` | default `NOW()` | Transition time (`occurred_at` on the wire). |
+| `published_at` | `TIMESTAMPTZ` | nullable | Set by the relay after JetStream acknowledged the event. |
+
+Invariants: an outbox row exists if and only if its transition committed;
+rows with `published_at IS NULL` are never deleted.
+
 ## Indexes and the queries they serve
 
 | Index | Definition | Used by |
@@ -168,6 +188,8 @@ No payloads, results, or keys are stored here by design (ADR 0009).
 | `dead_letters_inspection_index` | `(dead_lettered_at DESC, job_id DESC)` | Keyset pagination in `ListDeadLetters`. |
 | `schedules_due_index` | `(next_run_at, id) WHERE NOT paused` | `DispatchDueSchedules`. |
 | `schedules_list_index` | `(created_at DESC, id DESC)` | Keyset pagination in `ListSchedules`. |
+| `outbox_events_unpublished_index` | `(id) WHERE published_at IS NULL` | Relay batch read in id order; backlog count. |
+| `outbox_events_published_index` | `(published_at) WHERE published_at IS NOT NULL` | Retention purge. |
 
 ## Migration history
 
@@ -177,6 +199,7 @@ No payloads, results, or keys are stored here by design (ADR 0009).
 | 2 | `000002_add_job_leases.sql` | v0.2 | Lease and fencing columns, monotonic trigger, `abandoned` outcome, lease invariant. Recovers v0.1 `running` rows as `abandoned` (`V01_MIGRATION_RECOVERY`) and requeues them. |
 | 3 | `000003_add_retry_and_dead_letters.sql` | v0.3 | Execution key, retry snapshot columns, `dead_lettered_at`, `dead_letters` table, retry eligibility and DLQ indexes. |
 | 4 | `000004_add_schedules.sql` | v0.4 | `schedules` table, `jobs.schedule_id` and `scheduled_for`, per-slot unique index, due/list indexes. |
+| 5 | `000005_add_outbox.sql` | v0.5 | `outbox_events` table, job event trigger function and triggers, unpublished/published indexes. Existing jobs are not backfilled. |
 
 ### Migration rules
 
@@ -186,6 +209,7 @@ No payloads, results, or keys are stored here by design (ADR 0009).
 - Upgrades that tighten invariants must first repair existing rows in the same
   migration (see `000002`).
 - Upgrade paths are integration-tested (`TestV01RunningJobUpgradeIntegration`,
-  `TestV02SchemaUpgradeIntegration`).
+  `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`,
+  `TestV04SchemaUpgradeIntegration`).
 - Add a migration file and update this document and `CURRENT_STATE.md` in the
   same change.

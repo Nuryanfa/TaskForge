@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/Nuryanfa/TaskForge/internal/config"
+	"github.com/Nuryanfa/TaskForge/internal/natsbus"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
 	"github.com/Nuryanfa/TaskForge/internal/worker"
 )
@@ -28,6 +29,23 @@ func main() {
 	}
 	defer store.Close()
 
+	// NATS wake-ups are optional hints; without them the worker only polls.
+	var wake chan struct{}
+	if cfg.NATSURL != "" {
+		nc, err := natsbus.Connect(cfg.NATSURL, "taskforge-worker-"+cfg.WorkerID, cfg.NATSConnectTimeout)
+		if err == nil {
+			defer nc.Close()
+			wake = make(chan struct{}, cfg.WorkerConcurrency)
+			_, err = natsbus.SubscribeWakeups(nc, wake)
+		}
+		if err != nil {
+			wake = nil
+			logger.Error("worker_wakeup_subscribe_failed")
+		} else {
+			logger.Info("worker_wakeups_enabled")
+		}
+	}
+
 	runner := worker.New(
 		store, worker.NewRegistry(cfg.JobResultMaxBytes), logger, worker.Options{
 			WorkerID: cfg.WorkerID, Concurrency: cfg.WorkerConcurrency,
@@ -35,7 +53,7 @@ func main() {
 			ShutdownTimeout: cfg.ShutdownTimeout, LeaseDuration: cfg.JobLeaseDuration,
 			HeartbeatInterval: cfg.JobHeartbeatInterval, RecoveryInterval: cfg.RecoveryInterval,
 			RecoveryBatchSize: cfg.RecoveryBatchSize, ScheduleInterval: cfg.ScheduleInterval,
-			ScheduleBatchSize: cfg.ScheduleBatchSize,
+			ScheduleBatchSize: cfg.ScheduleBatchSize, Wake: wake,
 		},
 	)
 	logger.Info("worker_started", "worker_id", cfg.WorkerID, "concurrency", cfg.WorkerConcurrency)

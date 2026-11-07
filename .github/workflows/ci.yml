@@ -36,6 +36,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Start NATS JetStream
+        # Service containers cannot pass server arguments, so run it directly.
+        run: |
+          docker run -d --name nats -p 4222:4222 -p 8222:8222 nats:2.15.1-alpine -js -m 8222
+          for i in $(seq 1 30); do
+            curl -sf "http://127.0.0.1:8222/healthz?js-enabled-only=true" && exit 0
+            sleep 1
+          done
+          docker logs nats
+          exit 1
+
       - name: Download modules
         run: go mod download
 
@@ -51,14 +62,16 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: PostgreSQL integration tests
+      - name: PostgreSQL and NATS integration tests
         env:
           TASKFORGE_TEST_DATABASE_URL: postgres://taskforge:taskforge@127.0.0.1:5432/taskforge_test?sslmode=disable
+          TASKFORGE_TEST_NATS_URL: nats://127.0.0.1:4222
         run: go test ./... -run Integration -count=1
 
       - name: Race test
         env:
           TASKFORGE_TEST_DATABASE_URL: postgres://taskforge:taskforge@127.0.0.1:5432/taskforge_test?sslmode=disable
+          TASKFORGE_TEST_NATS_URL: nats://127.0.0.1:4222
         run: go test -race ./...
 
       - name: Build

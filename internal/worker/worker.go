@@ -33,6 +33,9 @@ type Options struct {
 	RecoveryBatchSize int
 	ScheduleInterval  time.Duration
 	ScheduleBatchSize int
+	// Wake, when non-nil, delivers hints that a job may be claimable now. It
+	// only shortens the poll wait; PostgreSQL still decides every claim.
+	Wake <-chan struct{}
 }
 
 type Runner struct {
@@ -92,6 +95,7 @@ func (r *Runner) runExecutor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case <-r.options.Wake:
 		}
 		if ctx.Err() != nil {
 			return

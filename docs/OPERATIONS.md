@@ -1,17 +1,20 @@
 # TaskForge operations guide
 
-Operational procedures for running TaskForge v0.3 in a development or trusted
+Operational procedures for running TaskForge v0.5 in a development or trusted
 lab environment. TaskForge is not production ready and has no authentication.
 
 ## Deployment order
 
-1. Start PostgreSQL and wait until it accepts connections.
+1. Start PostgreSQL and NATS (with JetStream, `-js`) and wait until both are
+   healthy.
 2. Run `taskforge-migrate` and wait for it to exit with status 0
    (`migration_complete`). Concurrent runs are safe; they serialize on a
    PostgreSQL session lock.
 3. Start or roll `taskforge-api` replicas.
 4. Start or roll `taskforge-worker` processes, each with a unique
-   `TASKFORGE_WORKER_ID`.
+   `TASKFORGE_WORKER_ID` (and optionally `TASKFORGE_NATS_URL` for wake-ups).
+5. Start `taskforge-relay`. Running two gives a warm standby; only one
+   publishes at a time.
 
 Compose performs these steps automatically with `docker compose up --build`.
 
@@ -29,6 +32,8 @@ Compose performs these steps automatically with `docker compose up --build`.
 - **API**: stateless; add replicas behind a trusted reverse proxy.
 - **Workers**: add processes or raise `TASKFORGE_WORKER_CONCURRENCY`. Each
   executor holds at most one connection at a time plus heartbeat traffic.
+- **Relay**: one publishes at a time by design. Raise
+  `TASKFORGE_OUTBOX_BATCH_SIZE` before anything else if the backlog grows.
 - PostgreSQL is the throughput ceiling. Watch connection count and lock wait
   time before adding workers.
 
@@ -40,7 +45,9 @@ Compose performs these steps automatically with `docker compose up --build`.
 | `GET /readyz` | PostgreSQL ping succeeded within the query timeout. | Readiness / load-balancer membership. |
 | `/taskforge-api healthcheck` | Container-internal liveness probe against `127.0.0.1:8080/healthz`. | Docker healthcheck. |
 
-The worker has no HTTP endpoint in v0.3; monitor it through logs and job state.
+The worker and relay have no HTTP endpoint; monitor them through logs, job
+state, and the outbox backlog. NATS exposes `/healthz?js-enabled-only=true`
+on its monitoring port (8222) for container health checks.
 
 ## Log events
 
@@ -50,7 +57,18 @@ results, keys, and DSNs are never logged.
 | Event | Level | Process | Meaning / action |
 | --- | --- | --- | --- |
 | `invalid_configuration` | error | all | Startup aborted; check env vars against [CONFIGURATION.md](CONFIGURATION.md). |
-| `database_connection_failed` | error | A W | Could not connect or ping at startup. |
+| `database_connection_failed` | error | A W R | Could not connect or ping at startup. |
+| `nats_connection_failed` | error | R | NATS client could not be created at startup. |
+| `relay_started` / `relay_stopped` | info | R | Lifecycle with stream name. |
+| `relay_stream_ready` | info | R | Stream created or verified. |
+| `relay_stream_failed` | error | R | Stream setup failed (NATS down or JetStream disabled); retried every second. |
+| `relay_batch_published` | info | R | `count` events acknowledged and marked. |
+| `relay_batch_failed` | error | R | A publish or batch transaction failed; acknowledged prefix kept, rest retried. |
+| `relay_outbox_purged` | info | R | `count` old published rows deleted. |
+| `relay_outbox_purge_failed` | error | R | Retention purge failed; retried next minute. |
+| `relay_outbox_backlog` | info | R | Unpublished events (logged every minute). A rising value means NATS or the relay is unhealthy. |
+| `worker_wakeups_enabled` | info | W | Worker subscribed to `job.queued` wake-ups. |
+| `worker_wakeup_subscribe_failed` | error | W | Wake-ups disabled; worker continues with polling only. |
 | `migration_complete` / `migration_failed` | info / error | M | Outcome of the migration run. |
 | `api_started` / `api_stopped` | info | A | Lifecycle. |
 | `api_server_failed` / `api_shutdown_failed` | error | A | Listener error or drain timeout. |
@@ -112,6 +130,15 @@ Codes stored in `jobs.last_error_code`, `job_attempts.error_code`, and
 - If the lease keeps getting renewed, the handler is still executing; it is
   bounded by `TASKFORGE_JOB_EXECUTION_TIMEOUT`.
 
+### Outbox backlog is growing
+
+1. Check relay logs for `relay_stream_failed` or `relay_batch_failed`.
+2. Check NATS health: `GET http://<nats>:8222/healthz?js-enabled-only=true`.
+3. Confirm a relay is running for this database; standby relays log nothing.
+4. Inspect the oldest unpublished event:
+   `SELECT id, event_type, created_at FROM outbox_events WHERE published_at IS NULL ORDER BY id LIMIT 5;`
+5. Job processing is unaffected; events resume in order once NATS recovers.
+
 ### Useful read-only SQL
 
 ```sql
@@ -127,6 +154,10 @@ ORDER BY available_at LIMIT 50;
 SELECT id, lease_owner, fencing_token, lease_expires_at, lease_expires_at - NOW() AS remaining
 FROM jobs WHERE status = 'running' ORDER BY lease_expires_at;
 
+-- Outbox backlog and age of the oldest unpublished event
+SELECT count(*), NOW() - min(created_at) AS oldest
+FROM outbox_events WHERE published_at IS NULL;
+
 -- Attempt history for one job
 SELECT attempt, worker_id, fencing_token, started_at, finished_at, outcome, error_code
 FROM job_attempts WHERE job_id = $1 ORDER BY attempt;
@@ -139,7 +170,9 @@ fencing trigger and bypass the attempt history.
 
 - All state is in PostgreSQL; standard PostgreSQL backups (for example
   `pg_dump` or base backups with WAL archiving) cover TaskForge entirely.
-- v0.3 has no automatic retention. `jobs`, `job_attempts`, and `dead_letters`
+- Published `outbox_events` rows are purged after `TASKFORGE_OUTBOX_RETENTION`;
+  JetStream keeps messages for `TASKFORGE_NATS_STREAM_MAX_AGE`.
+- v0.5 has no other automatic retention. `jobs`, `job_attempts`, and `dead_letters`
   grow without bound. Archive or delete terminal rows manually only when no
   dead-letter row references them.
 - Backups contain payloads and results; treat them as sensitive.

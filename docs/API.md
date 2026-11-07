@@ -1,7 +1,7 @@
-# TaskForge HTTP API reference (v0.4)
+# TaskForge HTTP API reference (v0.5)
 
 Base URL in development: `http://127.0.0.1:8080`. All request and response
-bodies are JSON. There is no authentication in v0.4; do not expose the API to
+bodies are JSON. There is no authentication in v0.5; do not expose the API to
 untrusted networks.
 
 ## Conventions

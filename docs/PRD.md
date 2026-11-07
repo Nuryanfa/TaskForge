@@ -3,8 +3,10 @@
 ## Problem
 
 Applications need durable asynchronous work without hiding failure behavior.
-TaskForge v0.4 adds client-controlled delayed job execution and durable
-recurring cron schedules while keeping ownership, retry, and failure explicit.
+TaskForge v0.5 makes the job lifecycle observable without polling: every
+state change produces a durable, privacy-safe event on NATS JetStream through a
+transactional outbox, and workers can react to new work immediately, while
+PostgreSQL keeps sole authority over ownership, retry, and failure.
 
 ## Product principles
 
@@ -14,7 +16,7 @@ recurring cron schedules while keeping ownership, retry, and failure explicit.
 4. Correctness-sensitive SQL is explicit and tested against real PostgreSQL.
 5. Payloads, results, idempotency keys, and database credentials are sensitive.
 
-## Implemented through v0.4
+## Implemented through v0.5
 
 - Embedded, versioned PostgreSQL migrations and a dedicated migration command.
 - Bounded `pgxpool` connection pooling and database operations.
@@ -40,7 +42,11 @@ recurring cron schedules while keeping ownership, retry, and failure explicit.
 - Process liveness and bounded database-aware readiness.
 - Graceful API and worker shutdown.
 - Docker Compose startup ordering and non-root application containers.
-- Unit, PostgreSQL integration, race, and in-process end-to-end tests.
+- Trigger-written transactional outbox for every job insert and status change.
+- `taskforge-relay`: ordered, deduplicated, at-least-once publication to NATS
+  JetStream with a single active relay and bounded retention.
+- Optional NATS wake-ups for workers with polling as the fallback.
+- Unit, PostgreSQL and NATS integration, race, and in-process end-to-end tests.
 
 ## API
 
@@ -92,8 +98,9 @@ side effect and crash before persisting success; lease recovery may then run
 the handler again. Fencing protects TaskForge's PostgreSQL state only. Handler
 integrations need idempotency keys or downstream fencing for their own effects.
 
-v0.4 excludes NATS, workflow DAGs, authentication or multitenancy, Kubernetes,
-and full observability.
+v0.5 excludes exactly-once event delivery, dispatching jobs through NATS,
+workflow DAGs, authentication or multitenancy, Kubernetes, and full
+observability.
 
 ## Acceptance criteria
 
@@ -113,6 +120,12 @@ and full observability.
 - All external operations and shutdown waits are bounded.
 - Integration tests use real PostgreSQL with isolated schemas.
 - Credentials, payloads, results, and idempotency keys do not appear in logs.
+- Every committed job insert or status change produces exactly one outbox row;
+  a rolled-back change produces none.
+- Published events contain no payloads, results, keys, or lease owners.
+- Events for one job are published in transition order; duplicates carry the
+  same `Nats-Msg-Id` and `event_id`.
+- NATS unavailability never blocks job submission or execution.
 
 ## Roadmap
 
@@ -122,7 +135,7 @@ and full observability.
 | v0.2 | Concurrent workers, leases, fencing, heartbeat, and crash recovery (implemented) |
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue (implemented) |
 | v0.4 | Delayed and recurring scheduling (implemented) |
-| v0.5 | Transactional outbox and NATS JetStream |
+| v0.5 | Transactional outbox and NATS JetStream (implemented) |
 | v0.6 | Workflow DAGs and saga compensation |
 | v0.7 | Metrics, tracing, dashboards, and SLOs |
 | v0.8 | High availability, Kubernetes, load, and chaos testing |

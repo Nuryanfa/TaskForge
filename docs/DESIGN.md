@@ -1,4 +1,4 @@
-# TaskForge system design (v0.4)
+# TaskForge system design (v0.5)
 
 This document describes how TaskForge is built: its components, package
 structure, concurrency model, the transactional protocols behind every job
@@ -22,7 +22,8 @@ Goals:
 - No leakage of payloads, results, idempotency keys, or credentials through the
   public API or logs.
 
-Non-goals for v0.4: exactly-once execution, message brokers, workflows,
+Non-goals for v0.5: exactly-once execution or delivery, dispatching jobs
+through the broker, workflows,
 authentication, multi-tenancy, metrics/tracing, and execution of arbitrary user
 code.
 
@@ -38,20 +39,29 @@ flowchart LR
         W1["taskforge-worker #1<br/>N executors + 1 recovery loop"]
         W2["taskforge-worker #k"]
         M["taskforge-migrate<br/>(one-shot)"]
+        R["taskforge-relay<br/>(one active per schema)"]
     end
-    DB[("PostgreSQL<br/>jobs · job_attempts · dead_letters")]
+    DB[("PostgreSQL<br/>jobs · job_attempts · dead_letters<br/>schedules · outbox_events")]
+    JS[("NATS JetStream<br/>TASKFORGE_EVENTS")]
+    EC["event consumers"]
 
     C -->|"REST/JSON"| API
     API -->|"create · get · cancel<br/>list DLQ · redrive"| DB
     W1 -->|"claim · heartbeat · complete/fail<br/>recover expired leases"| DB
     W2 --> DB
     M -->|"goose migrations<br/>under advisory lock"| DB
+    R -->|"read + mark outbox"| DB
+    R -->|"publish (Nats-Msg-Id)"| JS
+    JS --> EC
+    JS -.->|"job.queued wake-up hint"| W1
 ```
 
 | Process | Responsibility | Scaling | State |
 | --- | --- | --- | --- |
 | `taskforge-api` | Validates and persists submissions; read/cancel; DLQ inspection and redrive; health/readiness. | Horizontally, any number of replicas. | Stateless. |
 | `taskforge-worker` | Claims and executes jobs through a fixed executor pool; renews leases; persists outcomes; recovers expired leases. | Horizontally; each process has a unique `TASKFORGE_WORKER_ID`. | Only in-flight executions. |
+| `taskforge-relay` | Publishes committed outbox events to NATS JetStream in order; purges old published rows. | Run one or more; an advisory lock keeps exactly one active. | None (progress is in `outbox_events`). |
+| NATS JetStream | Stores and fans out lifecycle events; carries worker wake-up hints. | Single server in Compose (clustering is v0.8). | Event stream only; never job state. |
 | `taskforge-migrate` | Applies embedded SQL migrations, then exits. | Run once per deploy; concurrent runs serialize on a session lock. | None. |
 | PostgreSQL | Single durable source of truth and coordination point. | Single primary (HA is v0.8). | All durable state. |
 
@@ -66,6 +76,7 @@ cmd/
   taskforge-api/       wiring: config → store → httpapi → http.Server; signal-driven shutdown
   taskforge-worker/    wiring: config → store → registry → worker.Runner
   taskforge-migrate/   wiring: config → migrations.Run
+  taskforge-relay/     wiring: config → store → natsbus.Publisher → relay.Runner
 internal/
   config/              env parsing, defaults, bounds, cross-field validation
   job/                 pure domain: Job, Submission, Execution, Failure, DeadLetter,
@@ -74,6 +85,9 @@ internal/
   store/postgres/      explicit SQL; transactions; error classification
   worker/              executor pool, heartbeat, shutdown drain, handler registry
   migrations/          goose provider with PostgreSQL session locker
+  outbox/              event contract: subjects, message IDs, versioned body (no broker dependency)
+  natsbus/             NATS adapter: JetStream stream/publisher, wake-up subscription
+  relay/               outbox → JetStream loop: batching, stream setup, purge
 db/migrations/         versioned SQL files embedded into the binaries
 ```
 
@@ -93,6 +107,12 @@ flowchart TD
     postgres --> job
     postgres --> config
     migrations --> dbm["db/migrations (embed)"]
+    cmd --> relay
+    cmd --> natsbus
+    relay --> outbox
+    relay --> postgres
+    natsbus --> outbox
+    postgres --> outbox
 ```
 
 `httpapi` and `worker` each declare a narrow `Store` interface containing only
@@ -290,6 +310,40 @@ Each worker process runs one bounded schedule dispatcher loop every
 Missed ticks while workers were down or while a schedule was paused coalesce
 into at most one catch-up job, preventing backlog floods.
 
+### 5.7 Transactional outbox and relay
+
+Full contract: [EVENTS.md](EVENTS.md); rationale: [ADR 0011](adr/0011-transactional-outbox-and-nats-jetstream.md).
+
+1. Triggers on `jobs` (`AFTER INSERT`, and `AFTER UPDATE OF status` when the
+   status changes) insert one `outbox_events` row in the same transaction as
+   the change. Every code path that creates or transitions a job is covered.
+2. The relay opens a transaction bounded by `TASKFORGE_OUTBOX_BATCH_TIMEOUT`
+   and takes `pg_try_advisory_xact_lock(class, hashtext(current_schema()))`.
+   If another relay holds it, this one stands by (`ErrOutboxBusy`).
+3. It reads up to `TASKFORGE_OUTBOX_BATCH_SIZE` unpublished rows in id order
+   and publishes each synchronously with `Nats-Msg-Id: taskforge-outbox-<id>`,
+   stopping at the first failure.
+4. Only the acknowledged prefix is marked `published_at = NOW()`; the
+   transaction commits. Marking uses a fresh query timeout so a slow broker
+   that exhausted the batch budget cannot discard acknowledged progress. A full batch re-runs immediately; otherwise the relay
+   waits `TASKFORGE_OUTBOX_POLL_INTERVAL`.
+5. After a publish failure the relay re-ensures the stream before retrying.
+   Once a minute it deletes published rows older than
+   `TASKFORGE_OUTBOX_RETENTION` (bounded) and logs the backlog.
+
+Per-job order holds because a job's transitions are serialized by its row
+lock (a later event always has a larger id and commits later), one relay
+publishes at a time, and only an in-order prefix is ever marked.
+
+### 5.8 Worker wake-ups
+
+With `TASKFORGE_NATS_URL` set, each worker subscribes (core NATS) to
+`taskforge.events.job.queued`. If the event shows the job was due when it
+occurred (`available_at <= occurred_at`, both PostgreSQL timestamps), the
+handler does a non-blocking send on a buffered channel. Executors select on
+the poll timer **or** that channel, then call `ClaimNextJob` as usual. Lost,
+late, or duplicate hints only change latency, never correctness.
+
 ## 6. Worker concurrency model
 
 ```mermaid
@@ -346,7 +400,7 @@ type Handler interface {
   idempotency key for external side effects, or pass `exec.FencingToken` to a
   downstream that enforces monotonic tokens.
 
-The registry is a fixed, compile-time map. v0.4 ships only `demo.echo`, which
+The registry is a fixed, compile-time map. v0.5 ships only `demo.echo`, which
 expects `{"message": "<non-empty string>"}` and returns it unchanged. Unknown
 kinds fail permanently with `UNKNOWN_JOB_KIND`.
 
@@ -364,6 +418,9 @@ kinds fail permanently with `UNKNOWN_JOB_KIND`.
 | Concurrent redrive requests | Dead-letter row lock serializes them. | One new job. |
 | Concurrent migration commands | Goose session lock serializes them; the second sees an up-to-date schema. | Migrations applied once. |
 | Shutdown drain expires | Handler cancelled; retryable `SHUTDOWN_TIMEOUT` persisted, falling back to lease-expiry recovery if the write fails. | Bounded by drain + outcome write; at least once. |
+| Relay crashes after publishing, before commit | Rows stay unpublished and are republished; JetStream drops duplicates within the window. | At-least-once events; consumers dedupe by `event_id`. |
+| NATS unavailable | Relay publishes nothing and retries; backlog accumulates in `outbox_events`; workers fall back to polling. | No job processing impact; events delayed, not lost. |
+| Two relays running | Advisory lock lets one publish; the other stands by and takes over automatically. | Per-job order preserved. |
 | Handler returns invalid or oversized JSON | `CompleteJob` returns `ErrInvalidResult`; runner fails the job with permanent `INVALID_JOB_RESULT`. | Dead-lettered immediately instead of after lease expiry. |
 
 ## 9. Security and privacy design
@@ -386,5 +443,8 @@ kinds fail permanently with `UNKNOWN_JOB_KIND`.
 - Retry policy is global per API process; there is no per-queue or per-kind
   policy and no client-provided policy.
 - No retention or archival for `jobs`, `job_attempts`, or `dead_letters`.
-- Polling-based claiming; NATS-based wake-ups arrive with the outbox in v0.5.
+- Relay publishing is synchronous (one broker round trip per event); async
+  batching would raise throughput at the cost of a more complex ordering rule.
+- Events are not published for schedule changes, only for job transitions.
+- The relay polls the outbox; `LISTEN/NOTIFY` could lower event latency.
 - `/healthz` container healthcheck targets the fixed address `127.0.0.1:8080`.

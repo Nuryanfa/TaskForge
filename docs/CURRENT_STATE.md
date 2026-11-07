@@ -3,13 +3,14 @@
 ## Product
 
 TaskForge is an educational, production-like durable job platform written in
-Go. v0.4 adds client-controlled delayed jobs and recurring cron schedules to the
-leased, retry-capable worker model while PostgreSQL remains the durable
+Go. v0.5 adds a transactional outbox and NATS JetStream lifecycle events, plus
+optional NATS wake-ups for workers, while PostgreSQL remains the durable
 coordination authority.
 
-## Current implemented state (v0.4)
+## Current implemented state (v0.5)
 
-- Commands: `taskforge-api`, `taskforge-worker`, and `taskforge-migrate`.
+- Commands: `taskforge-api`, `taskforge-worker`, `taskforge-migrate`, and
+  `taskforge-relay`.
 - PostgreSQL access uses bounded `pgxpool` connections and explicit SQL.
 - Goose applies embedded SQL migrations under a PostgreSQL advisory lock.
 - The HTTP API submits, inspects, and cancels jobs, manages dead letters and
@@ -38,8 +39,18 @@ coordination authority.
 - Execution keys remain stable across attempts and linked redrives.
 - Dead letters contain operational metadata only and support cursor-based
   inspection and idempotent transactional redrive.
-- Compose orders PostgreSQL, migration completion, then API and worker startup.
-- CI runs unit, integration, race, build, Compose, and image validation.
+- Database triggers write a privacy-safe `outbox_events` row in the same
+  transaction as every job insert or status change (six `job.*` event types).
+- `taskforge-relay` publishes outbox rows to the `TASKFORGE_EVENTS` JetStream
+  stream in id order with `Nats-Msg-Id` deduplication, marks only the
+  acknowledged prefix, keeps one active relay per schema via an advisory lock,
+  and purges published rows after a retention period.
+- Workers optionally subscribe to `job.queued` events as wake-up hints, decided
+  only from database timestamps; polling remains the correctness fallback.
+- Compose orders PostgreSQL and NATS health, migration completion, then API,
+  worker, and relay startup.
+- CI runs unit, PostgreSQL and NATS integration, race, build, Compose, and
+  image validation.
 
 ## Architecture decisions
 
@@ -63,7 +74,7 @@ coordination authority.
 
 Not yet implemented:
 
-- NATS, workflow DAGs, or saga compensation
+- Workflow DAGs or saga compensation; events for schedule changes
 - Arbitrary commands, binaries, scripts, URLs, or user-provided executable code
 - Authentication, public-network exposure, multi-tenancy, or billing
 - gRPC, Prometheus, OpenTelemetry, Kubernetes, or a web dashboard
@@ -72,5 +83,6 @@ Not yet implemented:
 ## Further reading
 
 [System design](DESIGN.md) · [Data model](DATA_MODEL.md) · [API](API.md) ·
+[Events](EVENTS.md) ·
 [Configuration](CONFIGURATION.md) · [Operations](OPERATIONS.md) ·
 [Testing](TESTING.md) · [ADRs](adr/README.md)
