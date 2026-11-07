@@ -140,4 +140,3 @@ func TestNewScheduleSubmissionValidationAndFingerprint(t *testing.T) {
 		t.Fatal("expected unknown timezone rejection")
 	}
 }
-

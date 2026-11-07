@@ -276,4 +276,3 @@ func scanSchedule(row rowScanner) (job.Schedule, error) {
 		&found.CreatedAt, &found.UpdatedAt)
 	return found, err
 }
-
