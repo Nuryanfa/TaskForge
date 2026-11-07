@@ -777,3 +777,33 @@ func TestScheduleCreateReplayPauseResumeDeleteAndConcurrentDispatchIntegration(t
 		t.Fatalf("expected historical job to survive schedule deletion with nil schedule_id and preserved scheduled_for: %+v err=%v", preservedJob, err)
 	}
 }
+
+func TestRejectedResultLeavesJobOwnedForPermanentFailureIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	created, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"bad result"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNextJob(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteJob(ctx, claimed.Execution, json.RawMessage(`not json`)); !errors.Is(err, ErrInvalidResult) {
+		t.Fatalf("invalid result err=%v", err)
+	}
+	oversized := json.RawMessage(`"` + strings.Repeat("x", 64*1024) + `"`)
+	if err := store.CompleteJob(ctx, claimed.Execution, oversized); !errors.Is(err, ErrInvalidResult) {
+		t.Fatalf("oversized result err=%v", err)
+	}
+	if current, err := store.GetJob(ctx, created.ID); err != nil || current.Status != job.StatusRunning {
+		t.Fatalf("job after rejected result status=%s err=%v", current.Status, err)
+	}
+	if err := store.FailJob(ctx, claimed.Execution, job.Failure{Code: "INVALID_JOB_RESULT", Retryable: false}); err != nil {
+		t.Fatal(err)
+	}
+	letter, err := store.GetDeadLetter(ctx, created.ID)
+	if err != nil || letter.ErrorCode != "INVALID_JOB_RESULT" {
+		t.Fatalf("dead letter=%+v err=%v", letter, err)
+	}
+}

@@ -41,6 +41,7 @@ tests can run in parallel against one database.
 | Cron parsing, timezone evaluation, and schedule dispatch | `TestParseCronAndNext`, `TestNewScheduleSubmissionValidationAndFingerprint`, `TestScheduleAPICreateListPauseResumeDeleteAndPrivacy`, `TestScheduleCreateReplayPauseResumeDeleteAndConcurrentDispatchIntegration` |
 | Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration` |
 | Bounded concurrency and shutdown | `TestRunnerNeverExceedsConfiguredConcurrency`, `TestRunnerGracefulShutdownIsBoundedAndStopsClaims` |
+| Rejected handler results fail permanently | `TestRunnerFailsJobWhenStoreRejectsResult`, `TestRejectedResultLeavesJobOwnedForPermanentFailureIntegration` |
 | Execution metadata reaches handlers | `TestHandlerReceivesStableExecutionMetadata`, `TestRegistry` |
 | Full pipeline | `TestEchoEndToEndIntegration`, `TestRecurringScheduleEndToEndIntegration` |
 

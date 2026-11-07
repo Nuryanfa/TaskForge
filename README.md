@@ -158,13 +158,15 @@ keys or downstream fencing support.
 
 On graceful shutdown the worker stops claiming and recovering, continues
 heartbeats while active handlers receive a bounded drain window, then cancels
-remaining local work. A hard crash cannot drain; recovery begins only after
+remaining local work and records a retryable `SHUTDOWN_TIMEOUT` failure. A hard
+crash cannot drain; recovery begins only after
 the lease expires. The built-in registry still supports only bounded
 `demo.echo` and never executes arbitrary user code.
 
 Typed failures distinguish retryable conditions (including execution timeout
 and expired leases) from permanent failures such as invalid payloads or unknown
-job kinds. Retry policy is snapshotted when a job is created. Exponential
+job kinds. A handler result that is not valid JSON or exceeds the size limit
+fails permanently with `INVALID_JOB_RESULT`. Retry policy is snapshotted when a job is created. Exponential
 backoff is capped and uses deterministic bounded jitter; PostgreSQL `NOW()`
 sets the next `available_at`. Exhausted and permanent failures atomically enter
 the DLQ without copying payloads.
@@ -202,18 +204,19 @@ CI supplies a real PostgreSQL service and runs the suite with the race detector.
 
 ## Security limitations
 
-v0.3 has no authentication, authorization, TLS termination, multi-tenancy, or
+v0.4 has no authentication, authorization, TLS termination, multi-tenancy, or
 rate limiting. Bind it to loopback or a trusted development network only. Job
 payloads and results are potentially sensitive; the public GET API deliberately
 does not expose them. See [SECURITY.md](SECURITY.md).
 
-## Known v0.3 limitations
+## Known v0.4 limitations
 
 - Delivery is at least once; PostgreSQL fencing cannot fence external systems.
 - Retry is bounded but still at least once; redrive can execute logical work
   again and external systems must enforce execution idempotency.
-- No delayed/cron scheduling, NATS, gRPC,
-  workflows, Kubernetes, web UI, Prometheus, or OpenTelemetry.
+- Recurring schedules coalesce missed ticks into at most one catch-up run.
+- Retry policy is global per API process; no retention or archival.
+- No NATS, gRPC, workflows, Kubernetes, web UI, Prometheus, or OpenTelemetry.
 - Submission idempotency does not guarantee idempotent execution side effects.
 
 ## Roadmap

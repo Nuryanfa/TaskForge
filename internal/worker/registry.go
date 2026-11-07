@@ -15,6 +15,7 @@ const (
 	ErrorInvalidPayload   = "INVALID_JOB_PAYLOAD"
 	ErrorExecutionTimeout = "EXECUTION_TIMEOUT"
 	ErrorShutdownTimeout  = "SHUTDOWN_TIMEOUT"
+	ErrorInvalidResult    = "INVALID_JOB_RESULT"
 )
 
 type Handler interface {

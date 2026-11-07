@@ -28,6 +28,9 @@ coordination authority.
   tokens before handler execution.
 - Active executions renew leases; expired executions are requeued in bounded,
   lock-safe batches and their attempts are marked `abandoned`.
+- Executions cut off by the shutdown drain persist a retryable
+  `SHUTDOWN_TIMEOUT`; results rejected by the store (invalid JSON or oversized)
+  fail permanently with `INVALID_JOB_RESULT` instead of waiting for lease expiry.
 - Attempts and bounded success/failure/abandoned outcomes are persisted
   transactionally.
 - Retryable attempts return to `queued` with policy-snapshotted exponential
