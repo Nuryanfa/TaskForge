@@ -205,6 +205,7 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 			}
 		case <-shutdown:
 			cancelExecution()
+			r.persistOutcome(claimed.Execution, executionResult{failure: &job.Failure{Code: ErrorShutdownTimeout, Retryable: true}})
 			return
 		}
 	}
@@ -216,6 +217,11 @@ func (r *Runner) persistOutcome(execution job.Execution, outcome executionResult
 	var err error
 	if outcome.failure == nil {
 		err = r.store.CompleteJob(persistCtx, execution, outcome.result)
+		if errors.Is(err, postgres.ErrInvalidResult) {
+			// Retrying would produce the same rejected result, so fail permanently
+			// now instead of waiting for lease expiry.
+			err = r.store.FailJob(persistCtx, execution, job.Failure{Code: ErrorInvalidResult, Retryable: false})
+		}
 	} else {
 		err = r.store.FailJob(persistCtx, execution, *outcome.failure)
 	}

@@ -166,7 +166,7 @@ func (s *Store) RenewLease(ctx context.Context, execution job.Execution, leaseDu
 
 func (s *Store) CompleteJob(ctx context.Context, execution job.Execution, result json.RawMessage) error {
 	if int64(len(result)) > s.maxResultBytes || !json.Valid(result) {
-		return errors.New("result is invalid or exceeds configured limit")
+		return ErrInvalidResult
 	}
 	return s.finishJob(ctx, execution, job.StatusSucceeded, result, "")
 }

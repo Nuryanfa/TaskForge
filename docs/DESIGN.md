@@ -319,9 +319,13 @@ flowchart TB
 2. Each in-flight execution starts a drain timer (`TASKFORGE_SHUTDOWN_TIMEOUT`)
    and keeps heartbeating.
 3. If the handler finishes in time, its outcome is persisted normally.
-4. If the drain timer fires, the handler is cancelled and **no outcome is
-   written**. The job stays `running` until its lease expires and another
-   worker's recovery loop requeues it with `LEASE_EXPIRED`.
+4. If the drain timer fires, the handler is cancelled and a retryable
+   `SHUTDOWN_TIMEOUT` failure is persisted (bounded by
+   `TASKFORGE_SHUTDOWN_TIMEOUT`), so the job follows the normal retry policy
+   without waiting for lease expiry. If that write fails, the job stays
+   `running` until its lease expires and recovery requeues it with
+   `LEASE_EXPIRED`. A handler that ignores cancellation may still be running
+   locally; fencing keeps its late outcome from mutating the job.
 
 ## 7. Handler contract
 
@@ -332,7 +336,8 @@ type Handler interface {
 ```
 
 - Return `(result, nil)` for success. The result must be valid JSON within
-  `TASKFORGE_JOB_RESULT_MAX_BYTES`.
+  `TASKFORGE_JOB_RESULT_MAX_BYTES`; otherwise the store rejects it and the
+  runner fails the job permanently with `INVALID_JOB_RESULT`.
 - Return `(nil, &job.Failure{Code, Retryable})` for failure. Codes must be
   stable, uppercase machine codes and must not contain sensitive data.
 - Respect `ctx` cancellation; it fires on execution timeout, lost ownership,
@@ -341,7 +346,7 @@ type Handler interface {
   idempotency key for external side effects, or pass `exec.FencingToken` to a
   downstream that enforces monotonic tokens.
 
-The registry is a fixed, compile-time map. v0.3 ships only `demo.echo`, which
+The registry is a fixed, compile-time map. v0.4 ships only `demo.echo`, which
 expects `{"message": "<non-empty string>"}` and returns it unchanged. Unknown
 kinds fail permanently with `UNKNOWN_JOB_KIND`.
 
@@ -358,7 +363,8 @@ kinds fail permanently with `UNKNOWN_JOB_KIND`.
 | PostgreSQL unavailable | Store returns `ErrUnavailable`; API → `503`, worker logs and polls again; `/readyz` fails. | No partial transitions (transactions roll back). |
 | Concurrent redrive requests | Dead-letter row lock serializes them. | One new job. |
 | Concurrent migration commands | Goose session lock serializes them; the second sees an up-to-date schema. | Migrations applied once. |
-| Shutdown drain expires | Handler cancelled, nothing persisted; recovery after lease expiry. | Same as crash, but bounded by drain + lease. |
+| Shutdown drain expires | Handler cancelled; retryable `SHUTDOWN_TIMEOUT` persisted, falling back to lease-expiry recovery if the write fails. | Bounded by drain + outcome write; at least once. |
+| Handler returns invalid or oversized JSON | `CompleteJob` returns `ErrInvalidResult`; runner fails the job with permanent `INVALID_JOB_RESULT`. | Dead-lettered immediately instead of after lease expiry. |
 
 ## 9. Security and privacy design
 
@@ -377,11 +383,6 @@ kinds fail permanently with `UNKNOWN_JOB_KIND`.
 
 ## 10. Known design gaps (tracked for later versions)
 
-- `SHUTDOWN_TIMEOUT` is defined as a failure code but the runner does not
-  persist it; drained-out jobs are recovered only via lease expiry.
-- If `CompleteJob` rejects a handler result (invalid JSON or too large), the
-  error is logged and the job is recovered after lease expiry instead of being
-  failed immediately.
 - Retry policy is global per API process; there is no per-queue or per-kind
   policy and no client-provided policy.
 - No retention or archival for `jobs`, `job_attempts`, or `dead_letters`.

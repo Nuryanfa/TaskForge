@@ -18,6 +18,8 @@ type workerStore struct {
 	jobs              []job.Job
 	completed         int
 	failed            int
+	failures          []job.Failure
+	completeErr       error
 	claimsAfterCancel int
 }
 
@@ -41,13 +43,17 @@ func (s *workerStore) RenewLease(context.Context, job.Execution, time.Duration) 
 func (s *workerStore) CompleteJob(_ context.Context, _ job.Execution, _ json.RawMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.completeErr != nil {
+		return s.completeErr
+	}
 	s.completed++
 	return nil
 }
-func (s *workerStore) FailJob(_ context.Context, _ job.Execution, _ job.Failure) error {
+func (s *workerStore) FailJob(_ context.Context, _ job.Execution, failure job.Failure) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failed++
+	s.failures = append(s.failures, failure)
 	return nil
 }
 func (s *workerStore) RecoverExpiredJobs(context.Context, int) (int, error)   { return 0, nil }
@@ -116,7 +122,32 @@ func TestRunnerGracefulShutdownIsBoundedAndStopsClaims(t *testing.T) {
 	if elapsed := time.Since(startedAt); elapsed > 200*time.Millisecond {
 		t.Fatalf("shutdown took %s", elapsed)
 	}
-	if store.completed != 0 || store.failed != 0 || store.claimsAfterCancel != 0 {
+	if store.completed != 0 || store.failed != 1 || store.claimsAfterCancel != 0 {
 		t.Fatalf("completed=%d failed=%d claims-after-cancel=%d", store.completed, store.failed, store.claimsAfterCancel)
+	}
+	if got := store.failures[0]; got.Code != ErrorShutdownTimeout || !got.Retryable {
+		t.Fatalf("shutdown failure=%+v", got)
+	}
+}
+
+func TestRunnerFailsJobWhenStoreRejectsResult(t *testing.T) {
+	store := &workerStore{jobs: []job.Job{{ID: "one", Kind: "test", AttemptCount: 1, FencingToken: 1}},
+		completeErr: postgres.ErrInvalidResult}
+	registry := newRegistry(map[string]Handler{"test": HandlerFunc(func(context.Context, job.Execution, json.RawMessage) (json.RawMessage, *job.Failure) {
+		return json.RawMessage(`not json`), nil
+	})})
+	options := testOptions()
+	options.Concurrency = 1
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	runner := New(store, registry, slog.New(slog.NewTextHandler(io.Discard, nil)), options)
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if store.completed != 0 || store.failed != 1 {
+		t.Fatalf("completed=%d failed=%d", store.completed, store.failed)
+	}
+	if got := store.failures[0]; got.Code != ErrorInvalidResult || got.Retryable {
+		t.Fatalf("invalid result failure=%+v", got)
 	}
 }

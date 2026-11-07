@@ -8,4 +8,5 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency conflict")
 	ErrUnavailable         = errors.New("dependency unavailable")
 	ErrOwnershipLost       = errors.New("execution ownership lost")
+	ErrInvalidResult       = errors.New("result is invalid or exceeds configured limit")
 )

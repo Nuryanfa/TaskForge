@@ -71,6 +71,8 @@ Codes stored in `jobs.last_error_code`, `job_attempts.error_code`, and
 | Code | Retryable | Source | Typical cause |
 | --- | --- | --- | --- |
 | `EXECUTION_TIMEOUT` | yes | runner / handler | Handler exceeded `TASKFORGE_JOB_EXECUTION_TIMEOUT`. |
+| `SHUTDOWN_TIMEOUT` | yes | runner | Worker shut down and the handler did not finish within `TASKFORGE_SHUTDOWN_TIMEOUT`. |
+| `INVALID_JOB_RESULT` | no | runner | Handler returned invalid JSON or a result larger than `TASKFORGE_JOB_RESULT_MAX_BYTES`. |
 | `LEASE_EXPIRED` | yes | recovery | Worker crashed, was killed, paused, or lost database connectivity. |
 | `UNKNOWN_JOB_KIND` | no | registry | No handler registered for `kind`. |
 | `INVALID_JOB_PAYLOAD` | no | `demo.echo` | Payload missing `message` or has extra fields. |
@@ -84,8 +86,8 @@ Codes stored in `jobs.last_error_code`, `job_attempts.error_code`, and
 
 1. List recent entries: `GET /v1/dead-letters?limit=50`.
 2. Group by `kind` and `error_code`.
-   - Permanent codes (`UNKNOWN_JOB_KIND`, `INVALID_JOB_PAYLOAD`) indicate a
-     client or deployment bug. Fix the cause first; redriving will fail again.
+   - Permanent codes (`UNKNOWN_JOB_KIND`, `INVALID_JOB_PAYLOAD`,
+     `INVALID_JOB_RESULT`) indicate a client, handler, or deployment bug. Fix the cause first; redriving will fail again.
    - `EXECUTION_TIMEOUT` suggests a slow dependency or a timeout that is too
      low.
    - `LEASE_EXPIRED` suggests worker crashes or a lease shorter than real
