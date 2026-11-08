@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -122,4 +123,68 @@ func TestConcurrentRecoveryAcrossWorkflowsNoDeadlockIntegration(t *testing.T) {
 			assertWorkflowInvariants(t, store, id)
 		}
 	}
+}
+
+// TestCrashDuringCompensationIntegration kills a worker in the middle of a
+// compensation. The lease expires, recovery requeues the compensation, and a
+// second worker completes it. The compensation must run against the same
+// action execution key both times, the dead worker must be fenced out, and the
+// saga must still finish consistently.
+func TestCrashDuringCompensationIntegration(t *testing.T) {
+	store := workflowStore(t, 3)
+	ctx := context.Background()
+	wf := submitWorkflow(t, store,
+		withCompensation(step("a", "demo.echo"), "demo.echo"),
+		withCompensation(step("b", "demo.fail", "a"), "demo.echo"))
+	action := driveNext(t, store, "w0", succeed)
+	driveNext(t, store, "w0", failPermanent("DEMO_FAILURE"))
+
+	crashed, err := store.ClaimNextJob(ctx, "w1-crashes", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if crashed.Execution.Workflow == nil || crashed.Execution.Workflow.Role != job.RoleCompensation {
+		t.Fatalf("w1 claimed %+v, want a's compensation", crashed.Execution.Workflow)
+	}
+	time.Sleep(1100 * time.Millisecond) // w1 is dead: no heartbeat, no outcome
+	if recovered, err := store.RecoverExpiredJobs(ctx, 10); err != nil || recovered != 1 {
+		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	survivor := claimNext(t, store, "w2")
+	if survivor.Job.ID != crashed.Job.ID || survivor.Execution.FencingToken <= crashed.Execution.FencingToken {
+		t.Fatalf("w2 claimed %s token %d; crashed %s token %d", survivor.Job.ID, survivor.Execution.FencingToken, crashed.Job.ID, crashed.Execution.FencingToken)
+	}
+	applyOutcome(t, store, survivor, succeed)
+	if err := store.CompleteJob(ctx, crashed.Execution, []byte(`{"ok":true}`)); !errors.Is(err, ErrOwnershipLost) {
+		t.Fatalf("stale worker completion err=%v, want ErrOwnershipLost", err)
+	}
+
+	for name, claimed := range map[string]job.Claimed{"crashed": crashed, "survivor": survivor} {
+		if key := claimed.Execution.Workflow.CompensatesExecutionKey; key != action.Execution.ExecutionKey {
+			t.Fatalf("%s compensated key %q, want action key %q", name, key, action.Execution.ExecutionKey)
+		}
+	}
+	if countJobs(t, store, wf.ID, job.RoleCompensation) != 1 {
+		t.Fatalf("compensation jobs=%d", countJobs(t, store, wf.ID, job.RoleCompensation))
+	}
+	rows, err := store.pool.Query(ctx, `SELECT outcome, COALESCE(error_code, '') FROM job_attempts WHERE job_id=$1 ORDER BY attempt`, crashed.Job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts []string
+	for rows.Next() {
+		var outcome, code string
+		if err := rows.Scan(&outcome, &code); err != nil {
+			t.Fatal(err)
+		}
+		attempts = append(attempts, outcome+":"+code)
+	}
+	rows.Close()
+	if len(attempts) != 2 || attempts[0] != "abandoned:LEASE_EXPIRED" || attempts[1] != "succeeded:" {
+		t.Fatalf("attempts=%v", attempts)
+	}
+	if final := getWorkflow(t, store, wf.ID); final.Status != job.WorkflowCompensated {
+		t.Fatalf("final=%s", final.Status)
+	}
+	assertWorkflowInvariants(t, store, wf.ID)
 }
