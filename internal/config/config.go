@@ -117,6 +117,11 @@ type Config struct {
 	WorkflowMaxSteps       int
 	WorkflowMaxBytes       int64
 	WorkflowPageSize       int
+	OTelEndpoint           string
+	OTelSampleRatio        float64
+	OTelExportTimeout      time.Duration
+	MetricsQueues          []string
+	MetricsDBRefresh       time.Duration
 	NATSURL                string
 	NATSConnectTimeout     time.Duration
 	NATSPublishTimeout     time.Duration
@@ -308,6 +313,9 @@ func Load() (Config, error) {
 	}
 	cfg.WorkflowPageSize, err = intFromEnv("TASKFORGE_WORKFLOW_PAGE_SIZE", cfg.WorkflowPageSize, 1, maximumWorkflowPageSize)
 	if err != nil {
+		return Config{}, err
+	}
+	if err := loadObservability(&cfg); err != nil {
 		return Config{}, err
 	}
 
