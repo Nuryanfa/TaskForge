@@ -1,9 +1,14 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +17,7 @@ import (
 	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -137,5 +143,49 @@ func TestShutdownBoundedByHangingExporter(t *testing.T) {
 	}
 	if testutil.ToFloat64(failures) < 1 {
 		t.Fatal("export failure was not counted")
+	}
+}
+
+func TestExportErrorsAreNotLoggedRaw(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+	var raw bytes.Buffer
+	log.SetOutput(&raw)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	var structured bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&structured, nil))
+	shutdown, err := SetupTracing(context.Background(), TracingConfig{
+		Endpoint: "http://127.0.0.1:1", SampleRatio: 1, ExportTimeout: 100 * time.Millisecond,
+		BatchTimeout: 50 * time.Millisecond, ServiceName: "test", Logger: logger,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_, span := StartAttempt(context.Background(), claimedJob(nil, false))
+		span.End()
+		time.Sleep(200 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = shutdown(ctx)
+	if strings.Contains(raw.String(), "traces export") {
+		t.Fatalf("raw export errors reached the standard logger:\n%s", raw.String())
+	}
+	if count := strings.Count(structured.String(), `"msg":"otel_export_failed"`); count != 1 {
+		t.Fatalf("structured export failure logs=%d, want exactly 1 per minute:\n%s", count, structured.String())
+	}
+}
+
+func TestNoopTracingDoesNotForwardStoredParent(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+	if _, err := SetupTracing(context.Background(), TracingConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, span := StartAttempt(context.Background(), claimedJob(stored(), false))
+	span.End()
+	if got := tracectx.FromContext(ctx); got != nil {
+		t.Fatalf("tracing disabled but the attempt forwarded stored parent %s", *got)
 	}
 }

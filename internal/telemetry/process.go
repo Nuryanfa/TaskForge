@@ -29,7 +29,7 @@ func StartProcess(ctx context.Context, cfg config.Config, service, defaultMetric
 	metrics := NewMetrics(registry, cfg.MetricsQueues)
 	shutdown, err := SetupTracing(ctx, TracingConfig{
 		Endpoint: cfg.OTelEndpoint, SampleRatio: cfg.OTelSampleRatio,
-		ExportTimeout: cfg.OTelExportTimeout, ServiceName: service,
+		ExportTimeout: cfg.OTelExportTimeout, ServiceName: service, Logger: logger,
 	}, metrics.ExportFailures())
 	if err != nil {
 		return nil, fmt.Errorf("set up tracing: %w", err)

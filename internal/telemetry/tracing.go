@@ -37,6 +37,11 @@ type TracingConfig struct {
 	SampleRatio   float64
 	ExportTimeout time.Duration
 	ServiceName   string
+	// BatchTimeout is the batch processor's export interval (default 5s).
+	BatchTimeout time.Duration
+	// Logger receives the rate-limited otel_export_failed event; nil uses
+	// slog.Default().
+	Logger *slog.Logger
 }
 
 // SetupTracing installs the global tracer provider and the W3C TraceContext
@@ -45,6 +50,10 @@ type TracingConfig struct {
 // increments failures. The returned shutdown flushes within ctx's deadline.
 func SetupTracing(ctx context.Context, cfg TracingConfig, failures prometheus.Counter) (func(context.Context) error, error) {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	// Export failures are counted and logged (rate-limited, structured) by
+	// countingExporter; OTel's default handler would print every failed batch
+	// as a raw, unstructured line.
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {}))
 	if cfg.Endpoint == "" {
 		otel.SetTracerProvider(noop.NewTracerProvider())
 		return func(context.Context) error { return nil }, nil
@@ -52,6 +61,14 @@ func SetupTracing(ctx context.Context, cfg TracingConfig, failures prometheus.Co
 	endpoint, err := tracesURL(cfg.Endpoint)
 	if err != nil {
 		return nil, err
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	batchTimeout := cfg.BatchTimeout
+	if batchTimeout <= 0 {
+		batchTimeout = 5 * time.Second
 	}
 	exporter, err := otlptracehttp.New(ctx,
 		otlptracehttp.WithEndpointURL(endpoint),
@@ -62,9 +79,10 @@ func SetupTracing(ctx context.Context, cfg TracingConfig, failures prometheus.Co
 		return nil, fmt.Errorf("create trace exporter: %w", err)
 	}
 	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(&countingExporter{inner: exporter, failures: failures},
+		sdktrace.WithBatcher(&countingExporter{inner: exporter, failures: failures, logger: logger},
 			sdktrace.WithMaxQueueSize(maxQueuedSpans),
 			sdktrace.WithExportTimeout(cfg.ExportTimeout),
+			sdktrace.WithBatchTimeout(batchTimeout),
 		),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRatio))),
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", cfg.ServiceName))),
@@ -88,6 +106,7 @@ func tracesURL(endpoint string) (string, error) {
 type countingExporter struct {
 	inner    sdktrace.SpanExporter
 	failures prometheus.Counter
+	logger   *slog.Logger
 	mu       sync.Mutex
 	lastLog  time.Time
 }
@@ -101,7 +120,7 @@ func (e *countingExporter) ExportSpans(ctx context.Context, spans []sdktrace.Rea
 		e.mu.Lock()
 		if time.Since(e.lastLog) > time.Minute {
 			e.lastLog = time.Now()
-			slog.Default().Warn("otel_export_failed", "spans", len(spans))
+			e.logger.Warn("otel_export_failed", "spans", len(spans))
 		}
 		e.mu.Unlock()
 	}
@@ -131,6 +150,11 @@ func StartAttempt(ctx context.Context, claimed job.Claimed) (context.Context, tr
 	parent, ok := trace.SpanContext{}, false
 	if claimed.Job.TraceParent != nil {
 		parent, ok = tracectx.SpanContext(*claimed.Job.TraceParent)
+	}
+	if _, disabled := otel.GetTracerProvider().(noop.TracerProvider); disabled {
+		// With tracing off a no-op span would carry the stored parent forward
+		// and the store would copy it onto dispatched jobs; stay context-free.
+		ok = false
 	}
 	switch {
 	case ok && !claimed.Job.TraceLink:
