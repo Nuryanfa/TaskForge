@@ -24,6 +24,7 @@ type workerStore struct {
 	recovered         int
 	recoverErr        error
 	completeCtx       context.Context
+	renewErr          error
 }
 
 func (s *workerStore) ClaimNextJob(ctx context.Context, workerID string, _ time.Duration) (job.Claimed, error) {
@@ -42,7 +43,7 @@ func (s *workerStore) ClaimNextJob(ctx context.Context, workerID string, _ time.
 		WorkerID: workerID, FencingToken: claimedJob.FencingToken}
 	return job.Claimed{Job: claimedJob, Execution: execution}, nil
 }
-func (s *workerStore) RenewLease(context.Context, job.Execution, time.Duration) error { return nil }
+func (s *workerStore) RenewLease(context.Context, job.Execution, time.Duration) error { return s.renewErr }
 func (s *workerStore) CompleteJob(ctx context.Context, _ job.Execution, _ json.RawMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -229,8 +229,9 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 			if err != nil {
 				cancelExecution()
 				if !errors.Is(err, postgres.ErrOwnershipLost) {
-					r.logger.Error("worker_heartbeat_failed")
+					r.logger.Error("worker_heartbeat_failed", "trace_id", telemetry.TraceID(attempt.ctx))
 				}
+				r.recordLeaseLost(attempt)
 				return
 			}
 		case <-runCtx.Done():
@@ -258,31 +259,63 @@ type attemptScope struct {
 func (r *Runner) persistOutcome(attempt attemptScope, execution job.Execution, outcome executionResult) {
 	persistCtx, cancel := context.WithTimeout(attempt.ctx, r.options.ShutdownTimeout)
 	defer cancel()
-	defer r.recordAttempt(attempt, outcome)
 	var err error
 	if outcome.failure == nil {
 		err = r.store.CompleteJob(persistCtx, execution, outcome.result)
 		if errors.Is(err, postgres.ErrInvalidResult) {
 			// Retrying would produce the same rejected result, so fail permanently
-			// now instead of waiting for lease expiry.
-			err = r.store.FailJob(persistCtx, execution, job.Failure{Code: ErrorInvalidResult, Retryable: false})
+			// now instead of waiting for lease expiry. Telemetry records this
+			// failure, which is what was persisted, not the handler's success.
+			outcome = executionResult{failure: &job.Failure{Code: ErrorInvalidResult, Retryable: false}}
+			err = r.store.FailJob(persistCtx, execution, *outcome.failure)
 		}
 	} else {
 		err = r.store.FailJob(persistCtx, execution, *outcome.failure)
 	}
+	r.recordAttempt(attempt, outcome, err)
 	if err != nil && !errors.Is(err, postgres.ErrOwnershipLost) {
 		r.logger.Error("worker_persist_outcome_failed", "trace_id", telemetry.TraceID(attempt.ctx))
 	}
 }
 
-func (r *Runner) recordAttempt(attempt attemptScope, outcome executionResult) {
-	label := "succeeded"
+// Attempt-level outcomes for spans and the attempt-duration histogram. They
+// describe one attempt, unlike the job outcomes the store reports after
+// commit (succeeded, retry_scheduled, dead_lettered, abandoned).
+const (
+	attemptSucceeded = "succeeded"
+	attemptFailed    = "failed"
+	attemptLeaseLost = "lease_lost"
+)
+
+func (r *Runner) recordAttempt(attempt attemptScope, outcome executionResult, persistErr error) {
+	label := attemptSucceeded
 	if outcome.failure != nil {
-		label = "failed"
+		label = attemptFailed
 		attempt.span.SetAttributes(attribute.String("taskforge.job.error_code", outcome.failure.Code),
 			attribute.Bool("taskforge.job.retryable", outcome.failure.Retryable))
 		attempt.span.SetStatus(codes.Error, outcome.failure.Code)
 	}
+	if persistErr != nil {
+		// The outcome above was decided but not saved; the job's real fate is
+		// decided by whoever owns it now (lease recovery or another worker).
+		attempt.span.SetAttributes(attribute.Bool("taskforge.job.persisted", false))
+		message := "outcome not persisted"
+		if errors.Is(persistErr, postgres.ErrOwnershipLost) {
+			message = "outcome not persisted: ownership lost"
+		}
+		attempt.span.SetStatus(codes.Error, message)
+	}
+	r.finishAttempt(attempt, label)
+}
+
+// recordLeaseLost records an attempt abandoned because its lease could not be
+// renewed; recovery or the new owner decides what happens to the job.
+func (r *Runner) recordLeaseLost(attempt attemptScope) {
+	attempt.span.SetStatus(codes.Error, "lease lost")
+	r.finishAttempt(attempt, attemptLeaseLost)
+}
+
+func (r *Runner) finishAttempt(attempt attemptScope, label string) {
 	attempt.span.SetAttributes(attribute.String("taskforge.job.outcome", label))
 	if r.options.Metrics != nil {
 		r.options.Metrics.AttemptDuration(attempt.kind, label, time.Since(attempt.started))
