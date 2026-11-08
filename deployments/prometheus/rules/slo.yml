@@ -1,0 +1,118 @@
+# TaskForge SLO rules (docs/SLO.md). Burn-rate alerts follow the multi-window,
+# multi-burn-rate method: page at 14.4x over 1h and 5m, ticket at 6x over 6h
+# and 30m. Every burn alert also requires a minimum event volume so a handful
+# of events at low traffic cannot page anyone.
+groups:
+  - name: taskforge-slo-recording
+    rules:
+      - record: taskforge:slo_min_events_per_hour
+        expr: vector(20)
+
+      # Start latency: a claim is bad when it started more than 5 s after the
+      # job became ready (available_at), measured on the database clock.
+      - record: taskforge:start_latency_valid:rate5m
+        expr: sum(rate(taskforge_job_start_delay_seconds_count[5m]))
+      - record: taskforge:start_latency_valid:rate30m
+        expr: sum(rate(taskforge_job_start_delay_seconds_count[30m]))
+      - record: taskforge:start_latency_valid:rate1h
+        expr: sum(rate(taskforge_job_start_delay_seconds_count[1h]))
+      - record: taskforge:start_latency_valid:rate6h
+        expr: sum(rate(taskforge_job_start_delay_seconds_count[6h]))
+      - record: taskforge:start_latency_bad:ratio_rate5m
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[5m])) / taskforge:start_latency_valid:rate5m
+      - record: taskforge:start_latency_bad:ratio_rate30m
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[30m])) / taskforge:start_latency_valid:rate30m
+      - record: taskforge:start_latency_bad:ratio_rate1h
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[1h])) / taskforge:start_latency_valid:rate1h
+      - record: taskforge:start_latency_bad:ratio_rate6h
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[6h])) / taskforge:start_latency_valid:rate6h
+
+      # Reliability: only dead letters caused by the platform are bad; handler
+      # failures (class="handler") are the handler owner's budget.
+      - record: taskforge:reliability_valid:rate5m
+        expr: sum(rate(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[5m]))
+      - record: taskforge:reliability_valid:rate30m
+        expr: sum(rate(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[30m]))
+      - record: taskforge:reliability_valid:rate1h
+        expr: sum(rate(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[1h]))
+      - record: taskforge:reliability_valid:rate6h
+        expr: sum(rate(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[6h]))
+      - record: taskforge:reliability_bad:ratio_rate5m
+        expr: (sum(rate(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[5m])) or vector(0)) / taskforge:reliability_valid:rate5m
+      - record: taskforge:reliability_bad:ratio_rate30m
+        expr: (sum(rate(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[30m])) or vector(0)) / taskforge:reliability_valid:rate30m
+      - record: taskforge:reliability_bad:ratio_rate1h
+        expr: (sum(rate(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[1h])) or vector(0)) / taskforge:reliability_valid:rate1h
+      - record: taskforge:reliability_bad:ratio_rate6h
+        expr: (sum(rate(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[6h])) or vector(0)) / taskforge:reliability_valid:rate6h
+
+  - name: taskforge-slo-alerts
+    rules:
+      - alert: TaskForgeStartLatencyFastBurn
+        expr: |
+          taskforge:start_latency_bad:ratio_rate1h > (14.4 * 0.01)
+          and taskforge:start_latency_bad:ratio_rate5m > (14.4 * 0.01)
+          and on() (taskforge:start_latency_valid:rate1h * 3600) >= on() taskforge:slo_min_events_per_hour
+        for: 2m
+        labels:
+          severity: page
+          slo: start_latency
+        annotations:
+          summary: Jobs are starting later than 5 seconds after becoming ready, burning the error budget fast.
+      - alert: TaskForgeStartLatencySlowBurn
+        expr: |
+          taskforge:start_latency_bad:ratio_rate6h > (6 * 0.01)
+          and taskforge:start_latency_bad:ratio_rate30m > (6 * 0.01)
+          and on() (taskforge:start_latency_valid:rate1h * 3600) >= on() taskforge:slo_min_events_per_hour
+        for: 15m
+        labels:
+          severity: ticket
+          slo: start_latency
+        annotations:
+          summary: Jobs are starting later than 5 seconds after becoming ready, burning the error budget steadily.
+      - alert: TaskForgeReliabilityFastBurn
+        expr: |
+          taskforge:reliability_bad:ratio_rate1h > (14.4 * 0.005)
+          and taskforge:reliability_bad:ratio_rate5m > (14.4 * 0.005)
+          and on() (taskforge:reliability_valid:rate1h * 3600) >= on() taskforge:slo_min_events_per_hour
+        for: 2m
+        labels:
+          severity: page
+          slo: reliability
+        annotations:
+          summary: Jobs are being dead-lettered by platform failures, burning the error budget fast.
+      - alert: TaskForgeReliabilitySlowBurn
+        expr: |
+          taskforge:reliability_bad:ratio_rate6h > (6 * 0.005)
+          and taskforge:reliability_bad:ratio_rate30m > (6 * 0.005)
+          and on() (taskforge:reliability_valid:rate1h * 3600) >= on() taskforge:slo_min_events_per_hour
+        for: 15m
+        labels:
+          severity: ticket
+          slo: reliability
+        annotations:
+          summary: Jobs are being dead-lettered by platform failures, burning the error budget steadily.
+
+      # Start latency has no samples while nothing is claimed; this alert
+      # covers that blind spot from the database side.
+      - alert: TaskForgeJobsNotStarting
+        expr: max(taskforge_oldest_ready_job_age_seconds) > 60
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Ready jobs have waited more than 60 seconds; no worker is claiming work.
+      - alert: TaskForgeDBCollectorAbsent
+        expr: absent(taskforge_jobs)
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Database-state metrics are missing; the API or its database connection is down.
+      - alert: TaskForgeTargetDown
+        expr: up{job=~"taskforge-.*"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: A TaskForge process is not being scraped.

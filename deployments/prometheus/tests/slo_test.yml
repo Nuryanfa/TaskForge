@@ -1,0 +1,158 @@
+# promtool test rules /p/tests/slo_test.yml  (run from deployments/prometheus)
+rule_files:
+  - ../rules/slo.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 20 % of claims start later than 5 s at 600 claims/hour: burns the 1 % budget
+  # far faster than 14.4x, so the page-level alert fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
+        values: '0+10x120'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+        values: '0+8x120'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeStartLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: start_latency
+            exp_annotations:
+              summary: Jobs are starting later than 5 seconds after becoming ready, burning the error budget fast.
+
+  # 0.5 % slow starts is within the 1 % budget: silent.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
+        values: '0+10x420'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+        values: '0+9.95x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeStartLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeStartLatencySlowBurn
+        exp_alerts: []
+
+  # Every claim is late, but only 6 claims/hour: below the minimum volume of
+  # 20 events/hour, so neither alert fires on so little evidence.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
+        values: '0+0.1x420'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+        values: '0x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeStartLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeStartLatencySlowBurn
+        exp_alerts: []
+
+  # 8 % slow starts over 6 hours: above 6x but below 14.4x, so only the
+  # ticket-level slow-burn alert fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
+        values: '0+10x420'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+        values: '0+9.2x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TaskForgeStartLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeStartLatencySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: start_latency
+            exp_annotations:
+              summary: Jobs are starting later than 5 seconds after becoming ready, burning the error budget steadily.
+
+  # Platform dead letters (lease expiry) burn the reliability budget.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="succeeded",class="none"}'
+        values: '0+10x120'
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="dead_lettered",class="platform"}'
+        values: '0+2x120'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeReliabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: reliability
+            exp_annotations:
+              summary: Jobs are being dead-lettered by platform failures, burning the error budget fast.
+
+  # Handler failures (demo.fail) never burn the platform reliability budget.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="succeeded",class="none"}'
+        values: '0+10x420'
+      - series: 'taskforge_job_outcomes_total{kind="demo.fail",outcome="dead_lettered",class="handler"}'
+        values: '0+50x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeReliabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeReliabilitySlowBurn
+        exp_alerts: []
+
+  # No worker claims anything (no start-delay samples at all) while ready jobs
+  # age: the stall alert still fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_oldest_ready_job_age_seconds{instance="api:9101",job="taskforge-api"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TaskForgeJobsNotStarting
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: Ready jobs have waited more than 60 seconds; no worker is claiming work.
+
+  # The database collector (API process) stopped reporting.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="taskforge-worker",instance="worker:9102"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TaskForgeDBCollectorAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: Database-state metrics are missing; the API or its database connection is down.
+
+  # A scrape target is down.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="taskforge-worker",instance="worker:9102"}'
+        values: '0x10'
+      - series: 'taskforge_jobs{state="ready",instance="api:9101",job="taskforge-api"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TaskForgeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: taskforge-worker
+              instance: worker:9102
+            exp_annotations:
+              summary: A TaskForge process is not being scraped.
+      - eval_time: 5m
+        alertname: TaskForgeDBCollectorAbsent
+        exp_alerts: []

@@ -1,4 +1,4 @@
-.PHONY: fmt format-check vet test test-integration test-race build check run-api run-worker run-relay migrate compose-up compose-down
+.PHONY: fmt format-check vet test test-integration test-race build check run-api run-worker run-relay migrate compose-up compose-down slo-test dashboard
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -type f)
@@ -44,3 +44,10 @@ compose-up:
 
 compose-down:
 	docker compose down
+
+slo-test:
+	docker run --rm -v "$(CURDIR)/deployments/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v3.5.0 check rules rules/slo.yml
+	docker run --rm -v "$(CURDIR)/deployments/prometheus:/p" -w /p/tests --entrypoint promtool prom/prometheus:v3.5.0 test rules slo_test.yml
+
+dashboard:
+	python3 deployments/grafana/generate_dashboard.py
