@@ -45,7 +45,7 @@ func integrationStore(t *testing.T) *Store {
 		t.Fatal("open integration store")
 	}
 	t.Cleanup(store.Close)
-	if _, err := store.pool.Exec(ctx, `TRUNCATE job_attempts, jobs, schedules RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := store.pool.Exec(ctx, `TRUNCATE outbox_events, job_attempts, jobs, schedules RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal("clean integration tables")
 	}
 	return store

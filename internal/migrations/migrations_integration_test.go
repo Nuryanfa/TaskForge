@@ -132,6 +132,44 @@ func TestV03SchemaUpgradeIntegration(t *testing.T) {
 	}
 }
 
+func TestV04SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	v4 := int64(4)
+	if err := run(ctx, databaseURL, &v4); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	id := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-existing jobs are not backfilled; their next transition emits an event.
+	var count int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM outbox_events`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("outbox rows after upgrade=%d err=%v", count, err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE jobs SET status='canceled', completed_at=NOW() WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	var eventType string
+	if err := conn.QueryRow(ctx, `SELECT event_type FROM outbox_events WHERE job_id=$1`, id).Scan(&eventType); err != nil || eventType != "job.canceled" {
+		t.Fatalf("event after upgrade=%q err=%v", eventType, err)
+	}
+}
+
 func migrationTestURL(t *testing.T, baseURL string) string {
 	t.Helper()
 	schema := "taskforge_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "_")

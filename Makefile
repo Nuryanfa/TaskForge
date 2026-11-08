@@ -1,4 +1,4 @@
-.PHONY: fmt format-check vet test test-integration test-race build check run-api run-worker migrate compose-up compose-down
+.PHONY: fmt format-check vet test test-integration test-race build check run-api run-worker run-relay migrate compose-up compose-down
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -type f)
@@ -23,6 +23,7 @@ build:
 	go build -trimpath -o bin/taskforge-api ./cmd/taskforge-api
 	go build -trimpath -o bin/taskforge-worker ./cmd/taskforge-worker
 	go build -trimpath -o bin/taskforge-migrate ./cmd/taskforge-migrate
+	go build -trimpath -o bin/taskforge-relay ./cmd/taskforge-relay
 
 check: format-check vet test test-race build
 
@@ -31,6 +32,9 @@ run-api:
 
 run-worker:
 	go run ./cmd/taskforge-worker
+
+run-relay:
+	go run ./cmd/taskforge-relay
 
 migrate:
 	go run ./cmd/taskforge-migrate

@@ -151,3 +151,44 @@ func TestRunnerFailsJobWhenStoreRejectsResult(t *testing.T) {
 		t.Fatalf("invalid result failure=%+v", got)
 	}
 }
+
+func TestRunnerClaimsPromptlyOnWakeSignal(t *testing.T) {
+	store := &workerStore{}
+	registry := newRegistry(map[string]Handler{"test": HandlerFunc(func(context.Context, job.Execution, json.RawMessage) (json.RawMessage, *job.Failure) {
+		return json.RawMessage(`{}`), nil
+	})})
+	wake := make(chan struct{}, 1)
+	options := testOptions()
+	options.Concurrency = 1
+	options.PollInterval = time.Hour
+	options.Wake = wake
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := New(store, registry, slog.New(slog.NewTextHandler(io.Discard, nil)), options)
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	time.Sleep(20 * time.Millisecond) // the first claim finds nothing and sleeps for the poll interval
+	store.mu.Lock()
+	store.jobs = append(store.jobs, job.Job{ID: "woken", Kind: "test", AttemptCount: 1, FencingToken: 1})
+	store.mu.Unlock()
+	wake <- struct{}{}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		store.mu.Lock()
+		completed := store.completed
+		store.mu.Unlock()
+		if completed == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("wake signal did not trigger a claim")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

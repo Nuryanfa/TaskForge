@@ -15,6 +15,19 @@ services:
     volumes:
       - taskforge-postgres:/var/lib/postgresql
 
+  nats:
+    image: nats:2.15.1-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:${TASKFORGE_NATS_PORT:-4222}:4222"
+    volumes:
+      - taskforge-nats:/data
+
   migrate:
     image: taskforge:dev
     build:
@@ -68,9 +81,31 @@ services:
       TASKFORGE_RETRY_INITIAL_BACKOFF: ${TASKFORGE_RETRY_INITIAL_BACKOFF:-1s}
       TASKFORGE_RETRY_MAX_BACKOFF: ${TASKFORGE_RETRY_MAX_BACKOFF:-60s}
       TASKFORGE_RETRY_JITTER_PERCENT: ${TASKFORGE_RETRY_JITTER_PERCENT:-20}
+      TASKFORGE_NATS_URL: nats://nats:4222
     depends_on:
       migrate:
         condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+
+  taskforge-relay:
+    image: taskforge:dev
+    pull_policy: never
+    command: ["/taskforge-relay"]
+    environment:
+      TASKFORGE_DATABASE_URL: postgres://taskforge:taskforge@postgres:5432/taskforge?sslmode=disable
+      TASKFORGE_NATS_URL: nats://nats:4222
+      TASKFORGE_NATS_STREAM: ${TASKFORGE_NATS_STREAM:-TASKFORGE_EVENTS}
+      TASKFORGE_NATS_STREAM_MAX_AGE: ${TASKFORGE_NATS_STREAM_MAX_AGE:-168h}
+      TASKFORGE_OUTBOX_POLL_INTERVAL: ${TASKFORGE_OUTBOX_POLL_INTERVAL:-200ms}
+      TASKFORGE_OUTBOX_BATCH_SIZE: ${TASKFORGE_OUTBOX_BATCH_SIZE:-100}
+      TASKFORGE_OUTBOX_RETENTION: ${TASKFORGE_OUTBOX_RETENTION:-24h}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
 
 volumes:
   taskforge-postgres:
+  taskforge-nats:

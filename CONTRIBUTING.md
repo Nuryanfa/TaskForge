@@ -30,8 +30,10 @@ lease heartbeat and renewal, expired-lease recovery, and worker crash recovery.
 v0.3 provides typed failures, bounded retry/backoff, execution idempotency
 metadata, and dead-letter inspection/redrive.
 v0.4 provides delayed job submission (`run_at` / `delay_seconds`) and durable
-recurring cron schedules. Contributions must not add NATS,
-workflow DAGs, Kubernetes, or a web UI.
+recurring cron schedules.
+v0.5 provides a trigger-written transactional outbox, an ordered NATS
+JetStream relay, and optional worker wake-ups. NATS must never decide job
+ownership. Contributions must not add workflow DAGs, Kubernetes, or a web UI.
 
 ## Validation
 

@@ -21,6 +21,10 @@ var environmentKeys = []string{
 	"TASKFORGE_JOB_MAX_ATTEMPTS", "TASKFORGE_RETRY_INITIAL_BACKOFF",
 	"TASKFORGE_RETRY_MAX_BACKOFF", "TASKFORGE_RETRY_JITTER_PERCENT",
 	"TASKFORGE_DEAD_LETTER_PAGE_SIZE",
+	"TASKFORGE_NATS_URL", "TASKFORGE_NATS_CONNECT_TIMEOUT", "TASKFORGE_NATS_PUBLISH_TIMEOUT",
+	"TASKFORGE_NATS_STREAM", "TASKFORGE_NATS_STREAM_MAX_AGE", "TASKFORGE_NATS_DUPLICATE_WINDOW",
+	"TASKFORGE_OUTBOX_POLL_INTERVAL", "TASKFORGE_OUTBOX_BATCH_SIZE",
+	"TASKFORGE_OUTBOX_BATCH_TIMEOUT", "TASKFORGE_OUTBOX_RETENTION",
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -209,6 +213,103 @@ func TestCommandRequirements(t *testing.T) {
 	cfg.WorkerID = "unsafe worker"
 	if err := cfg.RequireWorker(); err == nil {
 		t.Fatal("expected invalid worker ID error")
+	}
+}
+
+func TestLoadNATSAndOutboxSettings(t *testing.T) {
+	clearEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSURL != "" || cfg.NATSConnectTimeout != 5*time.Second || cfg.NATSPublishTimeout != 2*time.Second ||
+		cfg.NATSStream != "TASKFORGE_EVENTS" || cfg.NATSStreamMaxAge != 168*time.Hour ||
+		cfg.NATSDuplicateWindow != 2*time.Minute || cfg.OutboxPollInterval != 200*time.Millisecond ||
+		cfg.OutboxBatchSize != 100 || cfg.OutboxBatchTimeout != 10*time.Second || cfg.OutboxRetention != 24*time.Hour {
+		t.Fatalf("unexpected NATS/outbox defaults: %+v", cfg)
+	}
+
+	values := map[string]string{
+		"TASKFORGE_NATS_URL": "nats://user:secret@127.0.0.1:4222", "TASKFORGE_NATS_CONNECT_TIMEOUT": "3s",
+		"TASKFORGE_NATS_PUBLISH_TIMEOUT": "1s", "TASKFORGE_NATS_STREAM": "TF_EVENTS-dev",
+		"TASKFORGE_NATS_STREAM_MAX_AGE": "48h", "TASKFORGE_NATS_DUPLICATE_WINDOW": "5m",
+		"TASKFORGE_OUTBOX_POLL_INTERVAL": "50ms", "TASKFORGE_OUTBOX_BATCH_SIZE": "250",
+		"TASKFORGE_OUTBOX_BATCH_TIMEOUT": "20s", "TASKFORGE_OUTBOX_RETENTION": "6h",
+	}
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSURL != values["TASKFORGE_NATS_URL"] || cfg.NATSConnectTimeout != 3*time.Second ||
+		cfg.NATSPublishTimeout != time.Second || cfg.NATSStream != "TF_EVENTS-dev" ||
+		cfg.NATSStreamMaxAge != 48*time.Hour || cfg.NATSDuplicateWindow != 5*time.Minute ||
+		cfg.OutboxPollInterval != 50*time.Millisecond || cfg.OutboxBatchSize != 250 ||
+		cfg.OutboxBatchTimeout != 20*time.Second || cfg.OutboxRetention != 6*time.Hour {
+		t.Fatalf("unexpected NATS/outbox overrides: %+v", cfg)
+	}
+
+	invalid := []struct{ key, value string }{
+		{"TASKFORGE_NATS_URL", "http://127.0.0.1:4222"},
+		{"TASKFORGE_NATS_URL", "nats://"},
+		{"TASKFORGE_NATS_URL", "not a url"},
+		{"TASKFORGE_NATS_STREAM", "bad stream"},
+		{"TASKFORGE_NATS_STREAM", strings.Repeat("S", 65)},
+		{"TASKFORGE_NATS_STREAM_MAX_AGE", "30s"},
+		{"TASKFORGE_NATS_STREAM_MAX_AGE", "8761h"},
+		{"TASKFORGE_NATS_DUPLICATE_WINDOW", "500ms"},
+		{"TASKFORGE_NATS_DUPLICATE_WINDOW", "61m"},
+		{"TASKFORGE_NATS_PUBLISH_TIMEOUT", "6m"},
+		{"TASKFORGE_OUTBOX_POLL_INTERVAL", "5ms"},
+		{"TASKFORGE_OUTBOX_POLL_INTERVAL", "2m"},
+		{"TASKFORGE_OUTBOX_BATCH_SIZE", "0"},
+		{"TASKFORGE_OUTBOX_BATCH_SIZE", "1001"},
+		{"TASKFORGE_OUTBOX_BATCH_TIMEOUT", "6m"},
+		{"TASKFORGE_OUTBOX_RETENTION", "30s"},
+		{"TASKFORGE_OUTBOX_RETENTION", "721h"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.key+"/"+tt.value, func(t *testing.T) {
+			clearEnvironment(t)
+			t.Setenv(tt.key, tt.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tt.key) {
+				t.Fatalf("expected error identifying %s, got %v", tt.key, err)
+			}
+		})
+	}
+	clearEnvironment(t)
+	t.Setenv("TASKFORGE_NATS_STREAM_MAX_AGE", "2m")
+	t.Setenv("TASKFORGE_NATS_DUPLICATE_WINDOW", "3m")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TASKFORGE_NATS_DUPLICATE_WINDOW") {
+		t.Fatalf("expected duplicate window/max age relationship error, got %v", err)
+	}
+	clearEnvironment(t)
+	t.Setenv("TASKFORGE_NATS_URL", "nats://user:topsecret@127.0.0.1:4222")
+	t.Setenv("TASKFORGE_NATS_STREAM", "bad stream")
+	if _, err := Load(); err == nil || strings.Contains(err.Error(), "topsecret") {
+		t.Fatalf("errors must not echo NATS credentials: %v", err)
+	}
+}
+
+func TestRelayRequirements(t *testing.T) {
+	clearEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DatabaseURL = "postgres://user:pass@localhost:5432/taskforge"
+	if err := cfg.RequireRelay(); err == nil || !strings.Contains(err.Error(), "TASKFORGE_NATS_URL") {
+		t.Fatalf("expected NATS URL requirement, got %v", err)
+	}
+	cfg.NATSURL = "tls://nats.internal:4222"
+	if err := cfg.RequireRelay(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DatabaseURL = ""
+	if err := cfg.RequireRelay(); err == nil {
+		t.Fatal("expected database requirement")
 	}
 }
 

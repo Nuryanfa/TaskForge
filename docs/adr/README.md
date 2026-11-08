@@ -16,6 +16,7 @@ by reference instead of rewriting it.
 | [0008](0008-execution-idempotency-contract.md) | Execution idempotency is a propagated contract | v0.3 | Accepted |
 | [0009](0009-dead-letter-storage-and-redrive.md) | Payload-free dead letters and immutable redrive | v0.3 | Accepted |
 | [0010](0010-delayed-jobs-and-recurring-schedules.md) | Delayed jobs and transactional recurring schedules | v0.4 | Accepted |
+| [0011](0011-transactional-outbox-and-nats-jetstream.md) | Transactional outbox, single active relay, and NATS wake-ups | v0.5 | Accepted |
 
 ## Writing a new ADR
 
