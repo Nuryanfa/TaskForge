@@ -76,7 +76,8 @@ results, keys, and DSNs are never logged.
 | `worker_claim_failed` | error | W | Claim query failed (other than "no job"); usually DB availability. |
 | `worker_heartbeat_failed` | error | W | Lease renewal failed for a reason other than lost ownership; execution was cancelled. |
 | `worker_persist_outcome_failed` | error | W | Could not write success/failure; job will be recovered after lease expiry. |
-| `worker_recovery_failed` | error | W | Recovery transaction failed. |
+| `worker_recovery_failed` | error | W | Recovery transaction failed as a whole (usually database availability). |
+| `worker_recovery_partial` | error | W | Some jobs in a recovery batch were rolled back; `failed_job_ids` lists them and the rest of the batch was recovered. |
 | `worker_jobs_recovered` | info | W | `count` expired leases were requeued or dead-lettered. Frequent occurrences mean crashes or a lease that is too short. |
 | `worker_schedule_dispatch_failed` | error | W | Recurring schedule dispatch transaction failed. |
 | `worker_schedules_dispatched` | info | W | `count` due schedules materialized into queued jobs. |
@@ -142,11 +143,15 @@ compensations, so some succeeded steps may still be uncompensated.
 2. Find the failed compensation in the DLQ by its `job_id`
    (`GET /v1/dead-letters/{job-id}`) and fix the cause.
 3. Redrive it (`POST /v1/dead-letters/{job-id}/redrive`). This creates a
-   **standalone** job with the same execution key; the workflow status does not
-   change.
-4. For steps still `waiting`, undo their effects by submitting standalone
-   compensation jobs (or in the downstream system directly). Use the original
-   action's execution key so the downstream can deduplicate.
+   **standalone** job with the same payload and execution key but **without
+   workflow context**: the handler does not receive the action's execution key
+   and must rely on the reference in its payload (see
+   [WORKFLOWS.md](WORKFLOWS.md#writing-an-idempotent-compensation)). The
+   workflow status does not change.
+4. For steps still `waiting`, undo their effects by submitting standalone jobs
+   (`POST /v1/jobs`) whose payload carries the business reference the handler
+   needs, or reverse them in the downstream system directly. Execution keys are
+   never exposed by the API, so they cannot be passed by hand.
 
 ### Workflow seems stuck in `running` or `compensating`
 
@@ -154,9 +159,12 @@ compensations, so some succeeded steps may still be uncompensated.
   Check them with the SQL below; they follow the normal job runbooks.
 - A step waiting in retry backoff keeps the workflow `running` until it
   succeeds or is dead-lettered.
-- `worker_recovery_failed` with `record step outcome … state conflict` means a
-  workflow's rows were edited by hand. Recovery skips that job and continues
-  with the rest; restore the workflow rows or leave the job for an operator.
+- `worker_recovery_partial` lists jobs whose recovery was rolled back, most
+  often because a workflow's rows were edited by hand. Recovery skips those
+  jobs and continues with the rest. Inspect each listed job with
+  `GET /v1/jobs/{id}` and its workflow with the SQL below, then restore the
+  workflow rows. Until then the job stays `running` with an expired lease and
+  is retried on every recovery pass.
 
 ### Outbox backlog is growing
 

@@ -77,6 +77,9 @@ require the checker to report them.
 | `TestCrashDuringCompensationIntegration` | A worker killed mid-compensation is fenced out; the compensation reruns once with the same action execution key; the saga completes. |
 | `TestDispatchedJobIsCreatedAfterItsDependenciesIntegration` | A forced lock-wait interleaving cannot make a dependent look older than its dependency. |
 | `TestGetWorkflowReturnsAConsistentSnapshotIntegration` | Readers never see a workflow status that disagrees with its steps. |
+| `TestAbortedWorkflowDoesNotRetryItsRunningStepIntegration` | A step that fails retryably after its workflow stopped is not executed again. |
+| `TestRedrivenCompensationIsStandaloneWithItsPayloadIntegration` | A redriven compensation runs standalone with its payload intact (the runbook's recovery path). |
+| `TestRecoveryLogsPartialFailuresWithJobIDs` | Partial recovery failures are logged with the failed job IDs and never the raw database error. |
 | `TestWorkflowSoakIntegration` | 25 seeded random DAGs with random failures, cancels, and 5 % worker crashes across 4 concurrent workers and a recovery loop; all invariants hold once quiescent. |
 
 The soak test prints its seed. Reproduce a run with

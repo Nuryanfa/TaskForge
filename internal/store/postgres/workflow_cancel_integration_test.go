@@ -171,3 +171,33 @@ func TestAbortedWorkflowDoesNotRetryItsRunningStepIntegration(t *testing.T) {
 	}
 	assertWorkflowInvariants(t, store, wf.ID)
 }
+
+// TestRedrivenCompensationIsStandaloneWithItsPayloadIntegration pins the
+// behavior the operations runbook relies on: a redriven compensation runs as
+// a standalone job without workflow context, so it must find what to undo in
+// its own payload, which redrive preserves.
+func TestRedrivenCompensationIsStandaloneWithItsPayloadIntegration(t *testing.T) {
+	store := workflowStore(t, 1)
+	ctx := context.Background()
+	wf := submitWorkflow(t, store, withCompensation(step("a", "demo.echo"), "demo.echo"), step("b", "demo.fail", "a"))
+	driveNext(t, store, "w", succeed)
+	driveNext(t, store, "w", failPermanent("DEMO_FAILURE"))
+	failedCompensation := driveNext(t, store, "w", failPermanent("REFUND_REJECTED"))
+	if getWorkflow(t, store, wf.ID).Status != job.WorkflowCompensationFailed {
+		t.Fatal("precondition: workflow should be compensation_failed")
+	}
+	redriven, _, err := store.RedriveDeadLetter(ctx, failedCompensation.Job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := claimNext(t, store, "operator-worker")
+	if claimed.Job.ID != redriven.ID || claimed.Execution.Workflow != nil {
+		t.Fatalf("claimed %s with workflow context %+v", claimed.Job.ID, claimed.Execution.Workflow)
+	}
+	if string(claimed.Job.Payload) != string(failedCompensation.Job.Payload) {
+		t.Fatalf("redrive changed the compensation payload: %s vs %s", claimed.Job.Payload, failedCompensation.Job.Payload)
+	}
+	if getWorkflow(t, store, wf.ID).Status != job.WorkflowCompensationFailed {
+		t.Fatal("redrive changed the workflow status")
+	}
+}

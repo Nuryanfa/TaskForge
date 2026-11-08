@@ -84,7 +84,9 @@ stateDiagram-v2
 - Pending steps are skipped.
 - Queued actions are canceled, including ones waiting in retry backoff.
 - Running actions are left to finish. If one succeeds, it is compensated like
-  any other succeeded step; if it fails, it is not.
+  any other succeeded step; if it fails, it is not. A retryable failure after
+  the abort is final: the step is not retried, because a stopped workflow
+  starts no new actions. Compensations still retry normally.
 - A failed step is never compensated: a failed action is assumed to have left
   no committed effect.
 - Compensations run in reverse dependency order. A step's compensation starts
@@ -132,6 +134,14 @@ compensation asks the downstream to reverse exactly that operation ("refund
 the charge made with key K"). If the compensation runs twice, the downstream
 sees the same key twice and can ignore the duplicate. The key never appears in
 API responses or logs.
+
+**Also put a business reference in the compensation payload** (for example
+`{"order_id": "1042"}`), and make the handler work when `exec.Workflow` is
+`nil`. An operator who redrives a dead-lettered compensation gets a standalone
+job: it keeps its payload but has no workflow context, so
+`CompensatesExecutionKey` is not available. A handler that can undo the effect
+from its payload alone (falling back from the key to the reference) stays
+usable in that recovery path.
 
 ## Demo handlers
 

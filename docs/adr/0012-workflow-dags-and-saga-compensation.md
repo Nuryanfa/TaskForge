@@ -43,7 +43,9 @@ after a newer transition, and the broker would effectively decide job state.
    completion the dispatching transaction waited for.
 4. **Saga compensation.** When a step fails terminally or the workflow is
    canceled: pending steps are skipped, queued actions (including ones waiting
-   in retry backoff) are canceled, and running actions are left to finish.
+   in retry backoff) are canceled, and running actions are left to finish; a
+   retryable failure of such an action is final, because a stopped workflow
+   starts no new actions.
    Succeeded steps are compensated in reverse dependency order: a step's
    compensation starts only after every succeeded dependent's compensation has
    succeeded and no dependent is still running. Failed steps are never
