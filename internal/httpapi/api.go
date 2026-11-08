@@ -660,14 +660,14 @@ func responseForJob(value job.Job) jobResponse {
 	}
 }
 
-// requireRegisteredKind rejects a kind this build has no handler for, so the
-// run-time failure UNKNOWN_JOB_KIND can only mean a deployment error. It runs
-// after structural validation, which keeps existing error codes unchanged.
 // startSpan starts a span that is a child of the request's server span.
 func startSpan(r *http.Request, name string, kind trace.SpanKind, attributes ...attribute.KeyValue) (context.Context, trace.Span) {
 	return otel.Tracer(telemetry.TracerName).Start(r.Context(), name, trace.WithSpanKind(kind), trace.WithAttributes(attributes...))
 }
 
+// requireRegisteredKind rejects a kind this build has no handler for, so the
+// run-time failure UNKNOWN_JOB_KIND can only mean a deployment error. It runs
+// after structural validation, which keeps existing error codes unchanged.
 func requireRegisteredKind(w http.ResponseWriter, r *http.Request, kind, where string) bool {
 	if job.IsRegisteredKind(kind) {
 		return true

@@ -255,7 +255,10 @@ func TestRecoveredJobRetryIsChildOfStoredContextIntegration(t *testing.T) {
 	if attempt.Parent.SpanID() != enqueue.SpanContext.SpanID() {
 		t.Fatal("the attempt after recovery is not a child of the stored enqueue context")
 	}
-	onlySpanNamed(t, exporter, "lease.recovery")
+	recovery := onlySpanNamed(t, exporter, "lease.recovery")
+	if attr(recovery, "taskforge.recovery.recovered") != "1" || attr(recovery, "taskforge.recovery.failed") != "0" {
+		t.Fatalf("lease.recovery attributes recovered=%q failed=%q", attr(recovery, "taskforge.recovery.recovered"), attr(recovery, "taskforge.recovery.failed"))
+	}
 }
 
 func TestTracingDisabledStillRunsIntegration(t *testing.T) {

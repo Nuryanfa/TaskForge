@@ -368,6 +368,7 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		return 0, classify("read expired leases", err)
 	}
 	rows.Close()
+	recoverySpan := trace.SpanFromContext(queryCtx)
 	if len(selected) > 0 {
 		// A root span only for passes that found work, so idle recovery loops
 		// export nothing. Compensations dispatched here are stamped with it.
@@ -375,6 +376,7 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		queryCtx, span = otel.Tracer(tracectx.TracerName).Start(queryCtx, "lease.recovery",
 			trace.WithNewRoot(), trace.WithAttributes(attribute.Int("taskforge.recovery.selected", len(selected))))
 		defer span.End()
+		recoverySpan = span
 	}
 	// Lock every involved workflow first, in ascending id order, so that
 	// concurrent recovery batches cannot deadlock on workflow rows.
@@ -386,6 +388,10 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 	// lease recovery for every other job forever.
 	recovered := 0
 	var failures []error
+	defer func() {
+		recoverySpan.SetAttributes(attribute.Int("taskforge.recovery.recovered", recovered),
+			attribute.Int("taskforge.recovery.failed", len(failures)))
+	}()
 	var failedIDs []string
 	for _, item := range selected {
 		exec := job.Execution{JobID: item.ID, Attempt: item.AttemptCount, WorkerID: *item.LeaseOwner,
