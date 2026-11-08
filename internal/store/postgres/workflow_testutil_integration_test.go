@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -151,6 +152,15 @@ func stepByName(t *testing.T, wf job.Workflow, name string) job.WorkflowStep {
 // database. Call it when the workflow is quiescent (no job mid-transition).
 func assertWorkflowInvariants(t *testing.T, s *Store, workflowID string) {
 	t.Helper()
+	for _, violation := range workflowInvariantViolations(t, s, workflowID) {
+		t.Errorf("%s in workflow %s", violation, workflowID)
+	}
+}
+
+// workflowInvariantViolations returns one entry per violated invariant.
+func workflowInvariantViolations(t *testing.T, s *Store, workflowID string) []string {
+	t.Helper()
+	var violated []string
 	checks := []struct {
 		name  string
 		query string
@@ -165,18 +175,26 @@ func assertWorkflowInvariants(t *testing.T, s *Store, workflowID string) {
 			LEFT JOIN jobs dj ON dj.id = d.job_id
 			WHERE s.workflow_id=$1 AND (dj.status IS DISTINCT FROM 'succeeded' OR dj.completed_at > j.created_at)`},
 		{"I3 succeeded workflow has only succeeded steps and no compensations", `
-			SELECT count(*) FROM workflows w JOIN workflow_steps s ON s.workflow_id = w.id
-			WHERE w.id=$1 AND w.status='succeeded' AND (s.status <> 'succeeded' OR s.compensation_job_id IS NOT NULL)`},
+			SELECT (SELECT count(*) FROM workflows w JOIN workflow_steps s ON s.workflow_id = w.id
+				WHERE w.id=$1 AND w.status='succeeded' AND s.status <> 'succeeded')
+			+ (SELECT count(*) FROM workflows w JOIN jobs j ON j.workflow_id = w.id
+				WHERE w.id=$1 AND w.status='succeeded' AND j.workflow_role='compensation')`},
 		{"I4 compensated/canceled workflow compensated every succeeded step", `
 			SELECT count(*) FROM workflows w JOIN workflow_steps s ON s.workflow_id = w.id
 			WHERE w.id=$1 AND w.status IN ('compensated','canceled') AND s.status='succeeded'
 			AND s.compensation_status NOT IN ('succeeded','not_defined')`},
-		{"I5 compensation created only after dependents' compensations completed", `
+		// A dependent's action job must have finished before the compensation
+		// was created (judged by timestamps, so a dependent that later failed
+		// cannot hide the violation), and a succeeded dependent's compensation
+		// must have completed first.
+		{"I5 compensation created only after dependents finished and were compensated", `
 			SELECT count(*) FROM workflow_steps s
 			JOIN jobs c ON c.id = s.compensation_job_id
 			JOIN workflow_steps d ON d.workflow_id = s.workflow_id AND s.name = ANY(d.depends_on)
+			LEFT JOIN jobs dj ON dj.id = d.job_id
 			LEFT JOIN jobs dc ON dc.id = d.compensation_job_id
-			WHERE s.workflow_id=$1 AND (d.status = 'dispatched'
+			WHERE s.workflow_id=$1 AND (
+				(d.job_id IS NOT NULL AND (dj.completed_at IS NULL OR dj.completed_at > c.created_at))
 				OR (d.status = 'succeeded' AND d.compensation_status <> 'not_defined'
 					AND (dc.status IS DISTINCT FROM 'succeeded' OR dc.completed_at > c.created_at)))`},
 		{"I6 terminal workflow has no live jobs and a completion time", `
@@ -190,7 +208,7 @@ func assertWorkflowInvariants(t *testing.T, s *Store, workflowID string) {
 				WHERE s.workflow_id = w.id AND s.compensation_status='failed'
 				AND c.status='failed' AND c.dead_lettered_at IS NOT NULL)`},
 		{"I8 step state agrees with its jobs", `
-			SELECT count(*) FROM workflow_steps s
+			SELECT (SELECT count(*) FROM workflow_steps s
 			LEFT JOIN jobs j ON j.id = s.job_id
 			LEFT JOIN jobs c ON c.id = s.compensation_job_id
 			WHERE s.workflow_id=$1 AND (
@@ -199,7 +217,15 @@ func assertWorkflowInvariants(t *testing.T, s *Store, workflowID string) {
 				OR (s.compensation_status='dispatched' AND c.status NOT IN ('queued','running'))
 				OR (s.compensation_status IN ('succeeded','failed') AND c.status::text <> s.compensation_status)
 				OR (s.status <> 'succeeded' AND s.compensation_status <> 'none')
-				OR (s.status = 'succeeded' AND s.compensation_status = 'none'))`},
+				OR (s.status = 'succeeded' AND s.compensation_status = 'none')))
+			+ (SELECT count(*) FROM jobs j LEFT JOIN workflow_steps js ON js.id = j.workflow_step_id
+				WHERE j.workflow_id=$1 AND (js.id IS NULL OR js.workflow_id <> j.workflow_id
+					OR (j.workflow_role='action' AND js.job_id IS DISTINCT FROM j.id)
+					OR (j.workflow_role='compensation' AND js.compensation_job_id IS DISTINCT FROM j.id)))`},
+		{"I9 a non-terminal workflow has live work", `
+			SELECT count(*) FROM workflows w
+			WHERE w.id=$1 AND w.status IN ('running','compensating') AND NOT EXISTS (
+				SELECT 1 FROM jobs j WHERE j.workflow_id = w.id AND j.status IN ('queued','running'))`},
 	}
 	for _, check := range checks {
 		var violations int
@@ -207,7 +233,8 @@ func assertWorkflowInvariants(t *testing.T, s *Store, workflowID string) {
 			t.Fatalf("%s: %v", check.name, err)
 		}
 		if violations != 0 {
-			t.Errorf("%s: %d violation(s) in workflow %s", check.name, violations, workflowID)
+			violated = append(violated, fmt.Sprintf("%s: %d violation(s)", check.name, violations))
 		}
 	}
+	return violated
 }
