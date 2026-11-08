@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/config"
@@ -18,6 +19,8 @@ type Store struct {
 	queryTimeout   time.Duration
 	maxResultBytes int64
 	retryPolicy    retryPolicy
+	observerMu     sync.RWMutex
+	observer       Observer
 }
 
 type retryPolicy struct {

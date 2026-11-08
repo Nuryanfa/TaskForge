@@ -193,6 +193,7 @@ func (s *Store) FailJob(ctx context.Context, execution job.Execution, failure jo
 	}
 	queryCtx, cancel := s.queryContext(ctx)
 	defer cancel()
+	queryCtx, events := withEvents(queryCtx)
 	tx, err := s.pool.BeginTx(queryCtx, pgx.TxOptions{})
 	if err != nil {
 		return classify("begin failure transaction", err)
@@ -220,6 +221,7 @@ func (s *Store) FailJob(ctx context.Context, execution job.Execution, failure jo
 	if err := tx.Commit(queryCtx); err != nil {
 		return classify("commit job failure", err)
 	}
+	s.flush(events)
 	return nil
 }
 
@@ -235,6 +237,9 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 	}
 	if command.RowsAffected() != 1 {
 		return nil, ErrStateConflict
+	}
+	if outcome == "abandoned" {
+		recordJob(ctx, current.Kind, "abandoned", failure.Code)
 	}
 	retry := failure.Retryable && current.AttemptCount < current.MaxAttempts
 	if retry && current.WorkflowID != nil && current.WorkflowRole != nil && *current.WorkflowRole == job.RoleAction {
@@ -259,6 +264,7 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 		if command.RowsAffected() != 1 {
 			return nil, ErrOwnershipLost
 		}
+		recordJob(ctx, current.Kind, "retry_scheduled", failure.Code)
 		return nil, nil
 	}
 	command, err = tx.Exec(ctx, `UPDATE jobs SET status='failed', last_error_code=$4, updated_at=NOW(),
@@ -277,6 +283,7 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 	if err != nil {
 		return nil, classify("insert dead letter", err)
 	}
+	recordJob(ctx, current.Kind, "dead_lettered", failure.Code)
 	code := failure.Code
 	return &terminalJob{ID: current.ID, WorkflowID: current.WorkflowID, StepID: current.WorkflowStepID,
 		Role: current.WorkflowRole, Status: job.StatusFailed, ErrorCode: &code}, nil
@@ -290,15 +297,17 @@ func (s *Store) finishJob(ctx context.Context, execution job.Execution, status j
 		return classify("begin completion transaction", err)
 	}
 	defer tx.Rollback(queryCtx)
+	queryCtx, events := withEvents(queryCtx)
 	finished := terminalJob{ID: execution.JobID, Status: status}
+	var kind string
 	err = tx.QueryRow(queryCtx, `UPDATE jobs SET status = $4, result = $5,
         last_error_code = NULLIF($6, ''), updated_at = NOW(), completed_at = NOW(),
         lease_owner = NULL, lease_expires_at = NULL
         WHERE id = $1 AND status = 'running' AND lease_owner = $2
           AND fencing_token = $3 AND lease_expires_at > NOW()
-        RETURNING workflow_id, workflow_step_id, workflow_role`, execution.JobID,
+        RETURNING workflow_id, workflow_step_id, workflow_role, kind`, execution.JobID,
 		execution.WorkerID, execution.FencingToken, status, result, errorCode).
-		Scan(&finished.WorkflowID, &finished.StepID, &finished.Role)
+		Scan(&finished.WorkflowID, &finished.StepID, &finished.Role, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrOwnershipLost
 	}
@@ -319,15 +328,18 @@ func (s *Store) finishJob(ctx context.Context, execution job.Execution, status j
 	if err := s.advanceWorkflows(queryCtx, tx, []terminalJob{finished}); err != nil {
 		return err
 	}
+	recordJob(queryCtx, kind, string(status), errorCode)
 	if err := tx.Commit(queryCtx); err != nil {
 		return classify("commit job outcome", err)
 	}
+	s.flush(events)
 	return nil
 }
 
 func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, error) {
 	queryCtx, cancel := s.queryContext(ctx)
 	defer cancel()
+	queryCtx, events := withEvents(queryCtx)
 	tx, err := s.pool.BeginTx(queryCtx, pgx.TxOptions{})
 	if err != nil {
 		return 0, classify("begin lease recovery transaction", err)
@@ -371,9 +383,11 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		if err != nil {
 			return 0, classify("begin recovery savepoint", err)
 		}
-		finished, err := s.finalizeFailure(queryCtx, savepoint, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
+		// Events of a savepoint count only if the savepoint is released.
+		savepointCtx, savepointEvents := withEvents(queryCtx)
+		finished, err := s.finalizeFailure(savepointCtx, savepoint, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
 		if err == nil && finished != nil {
-			err = s.advanceWorkflows(queryCtx, savepoint, []terminalJob{*finished})
+			err = s.advanceWorkflows(savepointCtx, savepoint, []terminalJob{*finished})
 		}
 		if err != nil {
 			_ = savepoint.Rollback(queryCtx)
@@ -387,11 +401,13 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		if err := savepoint.Commit(queryCtx); err != nil {
 			return 0, classify("release recovery savepoint", err)
 		}
+		events.merge(savepointEvents)
 		recovered++
 	}
 	if err := tx.Commit(queryCtx); err != nil {
 		return 0, classify("commit lease recovery", err)
 	}
+	s.flush(events)
 	if len(failures) > 0 {
 		return recovered, &RecoveryError{JobIDs: failedIDs, Err: errors.Join(failures...)}
 	}

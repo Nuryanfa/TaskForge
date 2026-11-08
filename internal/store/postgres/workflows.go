@@ -330,6 +330,7 @@ func (s *Store) CancelWorkflow(ctx context.Context, id string) (job.Workflow, er
 	if err != nil {
 		return job.Workflow{}, classify("begin workflow cancel", err)
 	}
+	queryCtx, events := withEvents(queryCtx)
 	defer tx.Rollback(queryCtx)
 	if _, err := tx.Exec(queryCtx, `SELECT id FROM jobs WHERE workflow_id=$1 AND status='queued'
 		ORDER BY id FOR UPDATE`, id); err != nil {
@@ -351,5 +352,6 @@ func (s *Store) CancelWorkflow(ctx context.Context, id string) (job.Workflow, er
 	if err := tx.Commit(queryCtx); err != nil {
 		return job.Workflow{}, classify("commit workflow cancel", err)
 	}
+	s.flush(events)
 	return s.GetWorkflow(ctx, id)
 }
