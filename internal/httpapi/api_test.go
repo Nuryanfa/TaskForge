@@ -23,6 +23,12 @@ type fakeStore struct {
 	schedules []job.Schedule
 	schedule  job.Schedule
 	hasMore   bool
+	// Workflow responses; workflowErr is returned by every workflow method.
+	workflow        job.Workflow
+	workflows       []job.Workflow
+	workflowCreated bool
+	workflowErr     error
+	lastWorkflow    job.WorkflowSubmission
 }
 
 func (f *fakeStore) CreateJob(context.Context, job.Submission) (job.Job, bool, error) {

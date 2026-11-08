@@ -37,7 +37,11 @@ func main() {
 	defer store.Close()
 
 	server := &http.Server{
-		Addr: cfg.HTTPAddr, Handler: httpapi.New(store, cfg.JobPayloadMaxBytes, cfg.DatabaseQueryTimeout, cfg.DeadLetterPageSize),
+		Addr: cfg.HTTPAddr, Handler: httpapi.NewWithOptions(store, httpapi.Options{
+			PayloadMaxBytes: cfg.JobPayloadMaxBytes, ReadinessTimeout: cfg.DatabaseQueryTimeout,
+			PageSize: cfg.DeadLetterPageSize, WorkflowMaxSteps: cfg.WorkflowMaxSteps,
+			WorkflowMaxBytes: cfg.WorkflowMaxBytes, WorkflowPageSize: cfg.WorkflowPageSize,
+		}),
 		ReadTimeout: cfg.ReadTimeout, ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout: cfg.WriteTimeout, IdleTimeout: cfg.IdleTimeout,
 	}

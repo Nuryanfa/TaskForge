@@ -31,6 +31,10 @@ type Store interface {
 	ListSchedules(context.Context, *time.Time, string, int) ([]job.Schedule, bool, error)
 	SetSchedulePaused(context.Context, string, bool) (job.Schedule, error)
 	DeleteSchedule(context.Context, string) error
+	CreateWorkflow(context.Context, job.WorkflowSubmission) (job.Workflow, bool, error)
+	GetWorkflow(context.Context, string) (job.Workflow, error)
+	ListWorkflows(context.Context, *time.Time, string, int) ([]job.Workflow, bool, error)
+	CancelWorkflow(context.Context, string) (job.Workflow, error)
 }
 
 type API struct {
@@ -38,6 +42,20 @@ type API struct {
 	payloadMaxBytes    int64
 	readinessTimeout   time.Duration
 	deadLetterPageSize int
+	workflowMaxSteps   int
+	workflowMaxBytes   int64
+	workflowPageSize   int
+}
+
+// Options configures the HTTP API. Zero workflow limits fall back to the
+// documented defaults (32 steps, 256 KiB body, 50 per page).
+type Options struct {
+	PayloadMaxBytes  int64
+	ReadinessTimeout time.Duration
+	PageSize         int
+	WorkflowMaxSteps int
+	WorkflowMaxBytes int64
+	WorkflowPageSize int
 }
 
 type errorEnvelope struct {
@@ -69,6 +87,8 @@ type jobResponse struct {
 	DeadLettered  bool       `json:"dead_lettered"`
 	ScheduleID    *string    `json:"schedule_id,omitempty"`
 	ScheduledFor  *time.Time `json:"scheduled_for,omitempty"`
+	WorkflowID    *string    `json:"workflow_id,omitempty"`
+	WorkflowRole  *string    `json:"workflow_role,omitempty"`
 }
 
 type submitRequest struct {
@@ -120,7 +140,25 @@ func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration, pag
 	if len(pageSizes) > 0 {
 		pageSize = pageSizes[0]
 	}
-	api := &API{store: store, payloadMaxBytes: payloadMaxBytes, readinessTimeout: readinessTimeout, deadLetterPageSize: pageSize}
+	return NewWithOptions(store, Options{PayloadMaxBytes: payloadMaxBytes, ReadinessTimeout: readinessTimeout, PageSize: pageSize})
+}
+
+func NewWithOptions(store Store, opts Options) http.Handler {
+	if opts.PageSize == 0 {
+		opts.PageSize = 50
+	}
+	if opts.WorkflowMaxSteps == 0 {
+		opts.WorkflowMaxSteps = 32
+	}
+	if opts.WorkflowMaxBytes == 0 {
+		opts.WorkflowMaxBytes = 256 * 1024
+	}
+	if opts.WorkflowPageSize == 0 {
+		opts.WorkflowPageSize = 50
+	}
+	api := &API{store: store, payloadMaxBytes: opts.PayloadMaxBytes, readinessTimeout: opts.ReadinessTimeout,
+		deadLetterPageSize: opts.PageSize, workflowMaxSteps: opts.WorkflowMaxSteps,
+		workflowMaxBytes: opts.WorkflowMaxBytes, workflowPageSize: opts.WorkflowPageSize}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("GET /readyz", api.ready)
@@ -136,6 +174,10 @@ func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration, pag
 	mux.HandleFunc("POST /v1/schedules/{id}/pause", api.pauseSchedule)
 	mux.HandleFunc("POST /v1/schedules/{id}/resume", api.resumeSchedule)
 	mux.HandleFunc("DELETE /v1/schedules/{id}", api.deleteSchedule)
+	mux.HandleFunc("POST /v1/workflows", api.createWorkflow)
+	mux.HandleFunc("GET /v1/workflows", api.listWorkflows)
+	mux.HandleFunc("GET /v1/workflows/{id}", api.getWorkflow)
+	mux.HandleFunc("POST /v1/workflows/{id}/cancel", api.cancelWorkflow)
 	mux.HandleFunc("/healthz", api.methodNotAllowed)
 	mux.HandleFunc("/readyz", api.methodNotAllowed)
 	mux.HandleFunc("/v1/jobs", api.methodNotAllowed)
@@ -148,6 +190,9 @@ func New(store Store, payloadMaxBytes int64, readinessTimeout time.Duration, pag
 	mux.HandleFunc("/v1/schedules/{id}", api.methodNotAllowed)
 	mux.HandleFunc("/v1/schedules/{id}/pause", api.methodNotAllowed)
 	mux.HandleFunc("/v1/schedules/{id}/resume", api.methodNotAllowed)
+	mux.HandleFunc("/v1/workflows", api.methodNotAllowed)
+	mux.HandleFunc("/v1/workflows/{id}", api.methodNotAllowed)
+	mux.HandleFunc("/v1/workflows/{id}/cancel", api.methodNotAllowed)
 	mux.HandleFunc("/", api.notFound)
 	return api.withRequestID(mux)
 }
@@ -457,6 +502,10 @@ func (a *API) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) parsePaginationQuery(w http.ResponseWriter, r *http.Request) (int, *time.Time, string, bool) {
+	return parsePaginationQueryUpTo(w, r, a.deadLetterPageSize)
+}
+
+func parsePaginationQueryUpTo(w http.ResponseWriter, r *http.Request, maxLimit int) (int, *time.Time, string, bool) {
 	for key := range r.URL.Query() {
 		if key != "limit" && key != "cursor" {
 			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "only limit and cursor are supported")
@@ -467,10 +516,10 @@ func (a *API) parsePaginationQuery(w http.ResponseWriter, r *http.Request) (int,
 			return 0, nil, "", false
 		}
 	}
-	limit := a.deadLetterPageSize
+	limit := maxLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > a.deadLetterPageSize {
+		if err != nil || value < 1 || value > maxLimit {
 			writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "limit is outside the allowed range")
 			return 0, nil, "", false
 		}
@@ -518,6 +567,8 @@ func (a *API) writeStoreError(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "job was not found")
 	case errors.Is(err, postgres.ErrStateConflict):
 		writeError(w, r, http.StatusConflict, "JOB_STATE_CONFLICT", "job state does not allow this operation")
+	case errors.Is(err, postgres.ErrWorkflowOwnedJob):
+		writeError(w, r, http.StatusConflict, "WORKFLOW_OWNED_JOB", "job belongs to a workflow; cancel the workflow instead")
 	case errors.Is(err, postgres.ErrIdempotencyConflict):
 		writeError(w, r, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different request")
 	case errors.Is(err, postgres.ErrUnavailable):
@@ -572,6 +623,7 @@ func responseForJob(value job.Job) jobResponse {
 		LastErrorCode: value.LastErrorCode, HasResult: len(value.Result) > 0, ResultBytes: len(value.Result),
 		MaxAttempts: value.MaxAttempts, DeadLettered: value.DeadLetteredAt != nil,
 		ScheduleID: value.ScheduleID, ScheduledFor: value.ScheduledFor,
+		WorkflowID: value.WorkflowID, WorkflowRole: value.WorkflowRole,
 	}
 }
 
