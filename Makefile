@@ -1,4 +1,4 @@
-.PHONY: fmt format-check vet test test-integration test-race build check run-api run-worker run-relay migrate compose-up compose-down slo-test dashboard
+.PHONY: fmt format-check vet test test-integration test-race build check run-api run-worker run-relay migrate compose-up compose-down slo-test dashboard demo
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -type f)
@@ -51,3 +51,7 @@ slo-test:
 
 dashboard:
 	python3 deployments/grafana/generate_dashboard.py
+
+demo:
+	docker compose -f compose.yaml -f compose.demo.yaml up -d --build
+	go run ./cmd/taskforge-loadgen -rate 2 -duration 4m -mix 'sleep:8000=80,echo=20' -seed 7
