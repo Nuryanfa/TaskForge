@@ -10,4 +10,5 @@ var (
 	ErrOwnershipLost       = errors.New("execution ownership lost")
 	ErrInvalidResult       = errors.New("result is invalid or exceeds configured limit")
 	ErrOutboxBusy          = errors.New("another outbox relay is active")
+	ErrWorkflowOwnedJob    = errors.New("job belongs to a workflow")
 )

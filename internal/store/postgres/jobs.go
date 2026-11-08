@@ -86,21 +86,26 @@ func (s *Store) GetJob(ctx context.Context, id string) (job.Job, error) {
 func (s *Store) CancelQueuedJob(ctx context.Context, id string) (job.Job, error) {
 	queryCtx, cancel := s.queryContext(ctx)
 	defer cancel()
+	// Workflow-owned jobs are canceled only through their workflow.
 	canceled, err := scanJob(s.pool.QueryRow(queryCtx, `UPDATE jobs
         SET status = 'canceled', updated_at = NOW(), completed_at = NOW()
-        WHERE id = $1 AND status = 'queued' RETURNING `+jobColumns, id))
+        WHERE id = $1 AND status = 'queued' AND workflow_id IS NULL RETURNING `+jobColumns, id))
 	if err == nil {
 		return canceled, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return job.Job{}, classify("cancel job", err)
 	}
-	var exists bool
-	if err := s.pool.QueryRow(queryCtx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE id = $1)`, id).Scan(&exists); err != nil {
+	var owned bool
+	err = s.pool.QueryRow(queryCtx, `SELECT workflow_id IS NOT NULL FROM jobs WHERE id = $1`, id).Scan(&owned)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return job.Job{}, ErrNotFound
+	}
+	if err != nil {
 		return job.Job{}, classify("check job after cancel conflict", err)
 	}
-	if !exists {
-		return job.Job{}, ErrNotFound
+	if owned {
+		return job.Job{}, ErrWorkflowOwnedJob
 	}
 	return job.Job{}, ErrStateConflict
 }
@@ -193,8 +198,14 @@ func (s *Store) FailJob(ctx context.Context, execution job.Execution, failure jo
 	if err != nil {
 		return classify("lock failed job", err)
 	}
-	if err := s.finalizeFailure(queryCtx, tx, current, execution, failure, "failed"); err != nil {
+	terminal, err := s.finalizeFailure(queryCtx, tx, current, execution, failure, "failed")
+	if err != nil {
 		return err
+	}
+	if terminal != nil {
+		if err := s.advanceWorkflows(queryCtx, tx, []terminalJob{*terminal}); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(queryCtx); err != nil {
 		return classify("commit job failure", err)
@@ -202,15 +213,18 @@ func (s *Store) FailJob(ctx context.Context, execution job.Execution, failure jo
 	return nil
 }
 
-func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job, execution job.Execution, failure job.Failure, outcome string) error {
+// finalizeFailure closes the attempt and either schedules a retry or
+// dead-letters the job. It returns the terminal job when the job reached
+// "failed", so the caller can advance its workflow in the same transaction.
+func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job, execution job.Execution, failure job.Failure, outcome string) (*terminalJob, error) {
 	command, err := tx.Exec(ctx, `UPDATE job_attempts SET finished_at=NOW(), outcome=$4, error_code=$5
 		WHERE job_id=$1 AND attempt=$2 AND fencing_token=$3 AND finished_at IS NULL`,
 		execution.JobID, execution.Attempt, execution.FencingToken, outcome, failure.Code)
 	if err != nil {
-		return classify("finalize failed attempt", err)
+		return nil, classify("finalize failed attempt", err)
 	}
 	if command.RowsAffected() != 1 {
-		return ErrStateConflict
+		return nil, ErrStateConflict
 	}
 	if failure.Retryable && current.AttemptCount < current.MaxAttempts {
 		delay := job.RetryDelay(current.ID, current.AttemptCount, current.InitialBackoff, current.MaxBackoff, current.JitterPercent)
@@ -219,30 +233,32 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 			WHERE id=$1 AND status='running' AND lease_owner=$2 AND fencing_token=$3`, current.ID,
 			execution.WorkerID, execution.FencingToken, delay.Microseconds(), failure.Code)
 		if err != nil {
-			return classify("schedule job retry", err)
+			return nil, classify("schedule job retry", err)
 		}
 		if command.RowsAffected() != 1 {
-			return ErrOwnershipLost
+			return nil, ErrOwnershipLost
 		}
-		return nil
+		return nil, nil
 	}
 	command, err = tx.Exec(ctx, `UPDATE jobs SET status='failed', last_error_code=$4, updated_at=NOW(),
 		completed_at=NOW(), dead_lettered_at=NOW(), lease_owner=NULL, lease_expires_at=NULL
 		WHERE id=$1 AND status='running' AND lease_owner=$2 AND fencing_token=$3`, current.ID,
 		execution.WorkerID, execution.FencingToken, failure.Code)
 	if err != nil {
-		return classify("dead-letter failed job", err)
+		return nil, classify("dead-letter failed job", err)
 	}
 	if command.RowsAffected() != 1 {
-		return ErrOwnershipLost
+		return nil, ErrOwnershipLost
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO dead_letters(job_id,queue,kind,final_attempt,error_code,dead_lettered_at)
 		VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(job_id) DO NOTHING`, current.ID, current.Queue,
 		current.Kind, current.AttemptCount, failure.Code)
 	if err != nil {
-		return classify("insert dead letter", err)
+		return nil, classify("insert dead letter", err)
 	}
-	return nil
+	code := failure.Code
+	return &terminalJob{ID: current.ID, WorkflowID: current.WorkflowID, StepID: current.WorkflowStepID,
+		Role: current.WorkflowRole, Status: job.StatusFailed, ErrorCode: &code}, nil
 }
 
 func (s *Store) finishJob(ctx context.Context, execution job.Execution, status job.Status, result json.RawMessage, errorCode string) error {
@@ -253,19 +269,22 @@ func (s *Store) finishJob(ctx context.Context, execution job.Execution, status j
 		return classify("begin completion transaction", err)
 	}
 	defer tx.Rollback(queryCtx)
-	command, err := tx.Exec(queryCtx, `UPDATE jobs SET status = $4, result = $5,
+	finished := terminalJob{ID: execution.JobID, Status: status}
+	err = tx.QueryRow(queryCtx, `UPDATE jobs SET status = $4, result = $5,
         last_error_code = NULLIF($6, ''), updated_at = NOW(), completed_at = NOW(),
         lease_owner = NULL, lease_expires_at = NULL
         WHERE id = $1 AND status = 'running' AND lease_owner = $2
-          AND fencing_token = $3 AND lease_expires_at > NOW()`, execution.JobID,
-		execution.WorkerID, execution.FencingToken, status, result, errorCode)
+          AND fencing_token = $3 AND lease_expires_at > NOW()
+        RETURNING workflow_id, workflow_step_id, workflow_role`, execution.JobID,
+		execution.WorkerID, execution.FencingToken, status, result, errorCode).
+		Scan(&finished.WorkflowID, &finished.StepID, &finished.Role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOwnershipLost
+	}
 	if err != nil {
 		return classify("update job outcome", err)
 	}
-	if command.RowsAffected() != 1 {
-		return ErrOwnershipLost
-	}
-	command, err = tx.Exec(queryCtx, `UPDATE job_attempts
+	command, err := tx.Exec(queryCtx, `UPDATE job_attempts
         SET finished_at = NOW(), outcome = $4, error_code = NULLIF($5, '')
         WHERE job_id = $1 AND attempt = $2 AND fencing_token = $3
           AND finished_at IS NULL`, execution.JobID, execution.Attempt,
@@ -275,6 +294,9 @@ func (s *Store) finishJob(ctx context.Context, execution job.Execution, status j
 	}
 	if command.RowsAffected() != 1 {
 		return ErrStateConflict
+	}
+	if err := s.advanceWorkflows(queryCtx, tx, []terminalJob{finished}); err != nil {
+		return err
 	}
 	if err := tx.Commit(queryCtx); err != nil {
 		return classify("commit job outcome", err)
@@ -310,12 +332,22 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		return 0, classify("read expired leases", err)
 	}
 	rows.Close()
+	var terminal []terminalJob
 	for _, item := range selected {
 		exec := job.Execution{JobID: item.ID, Attempt: item.AttemptCount, WorkerID: *item.LeaseOwner,
 			FencingToken: item.FencingToken, ExecutionKey: item.ExecutionKey}
-		if err := s.finalizeFailure(queryCtx, tx, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned"); err != nil {
+		finished, err := s.finalizeFailure(queryCtx, tx, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
+		if err != nil {
 			return 0, err
 		}
+		if finished != nil {
+			terminal = append(terminal, *finished)
+		}
+	}
+	// One engine pass for the whole batch: workflow rows are locked in
+	// ascending id order to keep concurrent recovery batches deadlock-free.
+	if err := s.advanceWorkflows(queryCtx, tx, terminal); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(queryCtx); err != nil {
 		return 0, classify("commit lease recovery", err)
