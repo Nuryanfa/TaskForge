@@ -34,7 +34,10 @@ type Registry struct {
 
 func NewRegistry(maxResultBytes int64) *Registry {
 	return &Registry{handlers: map[string]Handler{
-		"demo.echo": echoHandler{maxResultBytes: maxResultBytes},
+		"demo.echo":  echoHandler{maxResultBytes: maxResultBytes},
+		"demo.fail":  demoFail{},
+		"demo.flaky": demoFlaky{},
+		"demo.sleep": demoSleep{},
 	}}
 }
 
