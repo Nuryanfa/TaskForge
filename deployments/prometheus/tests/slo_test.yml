@@ -11,7 +11,7 @@ tests:
     input_series:
       - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
         values: '0+10x120'
-      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5.0"}'
         values: '0+8x120'
     alert_rule_test:
       - eval_time: 75m
@@ -28,7 +28,7 @@ tests:
     input_series:
       - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
         values: '0+10x420'
-      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5.0"}'
         values: '0+9.95x420'
     alert_rule_test:
       - eval_time: 75m
@@ -44,7 +44,7 @@ tests:
     input_series:
       - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
         values: '0+0.1x420'
-      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5.0"}'
         values: '0x420'
     alert_rule_test:
       - eval_time: 75m
@@ -60,7 +60,7 @@ tests:
     input_series:
       - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
         values: '0+10x420'
-      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5"}'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5.0"}'
         values: '0+9.2x420'
     alert_rule_test:
       - eval_time: 400m

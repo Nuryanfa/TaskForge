@@ -19,13 +19,13 @@ groups:
       - record: taskforge:start_latency_valid:rate6h
         expr: sum(rate(taskforge_job_start_delay_seconds_count[6h]))
       - record: taskforge:start_latency_bad:ratio_rate5m
-        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[5m])) / taskforge:start_latency_valid:rate5m
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[5m])) / taskforge:start_latency_valid:rate5m
       - record: taskforge:start_latency_bad:ratio_rate30m
-        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[30m])) / taskforge:start_latency_valid:rate30m
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[30m])) / taskforge:start_latency_valid:rate30m
       - record: taskforge:start_latency_bad:ratio_rate1h
-        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[1h])) / taskforge:start_latency_valid:rate1h
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[1h])) / taskforge:start_latency_valid:rate1h
       - record: taskforge:start_latency_bad:ratio_rate6h
-        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le="5"}[6h])) / taskforge:start_latency_valid:rate6h
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[6h])) / taskforge:start_latency_valid:rate6h
 
       # Reliability: only dead letters caused by the platform are bad; handler
       # failures (class="handler") are the handler owner's budget.

@@ -48,7 +48,7 @@ RED_GREEN = lambda limit: [{"color": "red", "value": None}, {"color": "green", "
 
 row("Are we meeting our SLOs?")
 panel("stat", "Start latency: share of jobs started within 5 s (target 99 %)",
-      [('1 - (sum(increase(taskforge_job_start_delay_seconds_count[$__range])) - sum(increase(taskforge_job_start_delay_seconds_bucket{le="5"}[$__range]))) / sum(increase(taskforge_job_start_delay_seconds_count[$__range]))', "SLI")],
+      [('1 - (sum(increase(taskforge_job_start_delay_seconds_count[$__range])) - sum(increase(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[$__range]))) / sum(increase(taskforge_job_start_delay_seconds_count[$__range]))', "SLI")],
       0, 6, unit="percentunit", thresholds=RED_GREEN(0.99))
 panel("stat", "Reliability: share of jobs not lost to platform failures (target 99.5 %)",
       [('1 - (sum(increase(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[$__range])) or vector(0)) / sum(increase(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[$__range]))', "SLI")],

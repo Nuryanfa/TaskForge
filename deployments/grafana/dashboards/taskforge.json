@@ -48,7 +48,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "1 - (sum(increase(taskforge_job_start_delay_seconds_count[$__range])) - sum(increase(taskforge_job_start_delay_seconds_bucket{le=\"5\"}[$__range]))) / sum(increase(taskforge_job_start_delay_seconds_count[$__range]))",
+          "expr": "1 - (sum(increase(taskforge_job_start_delay_seconds_count[$__range])) - sum(increase(taskforge_job_start_delay_seconds_bucket{le=~\"5|5.0\"}[$__range]))) / sum(increase(taskforge_job_start_delay_seconds_count[$__range]))",
           "legendFormat": "SLI",
           "refId": "A"
         }
