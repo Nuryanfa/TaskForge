@@ -1,0 +1,19 @@
+# Demo-speed copy of TaskForgeStartLatencyFastBurn: windows 3m and 1m instead
+# of 1h and 5m, a 30s "for", and no minimum volume, so the burn demo in
+# docs/SLO.md fires within a few minutes. Never load this in production.
+groups:
+  - name: taskforge-slo-demo
+    interval: 5s
+    rules:
+      - alert: TaskForgeStartLatencyFastBurnDemo
+        expr: |
+          (1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[3m])) / sum(rate(taskforge_job_start_delay_seconds_count[3m]))) > (14.4 * 0.01)
+          and
+          (1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[1m])) / sum(rate(taskforge_job_start_delay_seconds_count[1m]))) > (14.4 * 0.01)
+        for: 30s
+        labels:
+          severity: page
+          slo: start_latency
+          demo: "true"
+        annotations:
+          summary: Demo-speed burn of the start-latency budget (windows scaled down for the walkthrough).
