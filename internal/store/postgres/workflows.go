@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
@@ -244,6 +246,8 @@ func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy w
 	if command.RowsAffected() != 1 {
 		return fmt.Errorf("link step %s %s: %w", item.name, role, ErrStateConflict)
 	}
+	trace.SpanFromContext(ctx).AddEvent("workflow.dispatch", trace.WithAttributes(
+		attribute.String("taskforge.workflow.step", item.name), attribute.String("taskforge.workflow.role", role)))
 	return nil
 }
 

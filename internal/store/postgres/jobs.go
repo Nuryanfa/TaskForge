@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"regexp"
 	"time"
 
@@ -365,6 +368,14 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		return 0, classify("read expired leases", err)
 	}
 	rows.Close()
+	if len(selected) > 0 {
+		// A root span only for passes that found work, so idle recovery loops
+		// export nothing. Compensations dispatched here are stamped with it.
+		var span trace.Span
+		queryCtx, span = otel.Tracer(tracectx.TracerName).Start(queryCtx, "lease.recovery",
+			trace.WithNewRoot(), trace.WithAttributes(attribute.Int("taskforge.recovery.selected", len(selected))))
+		defer span.End()
+	}
 	// Lock every involved workflow first, in ascending id order, so that
 	// concurrent recovery batches cannot deadlock on workflow rows.
 	if err := lockWorkflowsInOrder(queryCtx, tx, selected); err != nil {

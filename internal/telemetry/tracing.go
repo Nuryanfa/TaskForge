@@ -27,7 +27,7 @@ import (
 )
 
 // TracerName names every TaskForge span's instrumentation scope.
-const TracerName = "github.com/Nuryanfa/TaskForge"
+const TracerName = tracectx.TracerName
 
 const maxQueuedSpans = 2048
 

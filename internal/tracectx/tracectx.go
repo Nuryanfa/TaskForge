@@ -11,6 +11,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// TracerName names every TaskForge span's instrumentation scope.
+const TracerName = "github.com/Nuryanfa/TaskForge"
+
 var propagator = propagation.TraceContext{}
 
 // FromContext returns the traceparent of the span context in ctx, or nil when

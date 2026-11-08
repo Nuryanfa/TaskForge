@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
@@ -218,6 +221,12 @@ func (s *Store) DispatchDueSchedules(ctx context.Context, batchSize int) (int, e
 	dispatched := 0
 	for _, entry := range selected {
 		item := entry.schedule
+		// One root span per dispatched slot: the materialized job is its child,
+		// so a busy tick never produces one span with unbounded children.
+		slotCtx, slotSpan := otel.Tracer(tracectx.TracerName).Start(queryCtx, "schedule.dispatch", trace.WithNewRoot(),
+			trace.WithAttributes(attribute.String("taskforge.schedule.id", item.ID),
+				attribute.String("taskforge.schedule.scheduled_for", item.NextRunAt.UTC().Format(time.RFC3339))))
+		slotSpan.End()
 		cron, _, err := job.ParseCron(item.CronExpr)
 		if err != nil {
 			return 0, fmt.Errorf("parse schedule cron %s: %w", item.ID, err)
@@ -249,7 +258,7 @@ func (s *Store) DispatchDueSchedules(ctx context.Context, batchSize int) (int, e
 			newJobID, item.Queue, item.Kind, item.Payload, item.PayloadHash, item.Priority,
 			uuid.NewString(), s.retryPolicy.maxAttempts, s.retryPolicy.initialBackoff.Milliseconds(),
 			s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, item.ID, slot,
-			tracectx.FromContext(queryCtx)).Scan(&createdID)
+			tracectx.FromContext(slotCtx)).Scan(&createdID)
 		if err == nil {
 			insertedID = &createdID
 			dispatched++

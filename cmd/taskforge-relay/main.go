@@ -11,6 +11,7 @@ import (
 	"github.com/Nuryanfa/TaskForge/internal/natsbus"
 	"github.com/Nuryanfa/TaskForge/internal/relay"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
+	"github.com/Nuryanfa/TaskForge/internal/telemetry"
 )
 
 func main() {
@@ -28,6 +29,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+
+	process, err := telemetry.StartProcess(ctx, cfg, "taskforge-relay", "127.0.0.1:9103", logger)
+	if err != nil {
+		logger.Error("metrics_listen_failed")
+		os.Exit(1)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = process.Shutdown(flushCtx)
+	}()
+	store.SetObserver(process.Metrics)
+	process.Registry.MustRegister(telemetry.NewPoolCollector(store.PoolStats))
 
 	nc, err := natsbus.Connect(cfg.NATSURL, "taskforge-relay", cfg.NATSConnectTimeout)
 	if err != nil {
