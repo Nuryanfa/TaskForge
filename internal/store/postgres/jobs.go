@@ -360,6 +360,7 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 	// lease recovery for every other job forever.
 	recovered := 0
 	var failures []error
+	var failedIDs []string
 	for _, item := range selected {
 		exec := job.Execution{JobID: item.ID, Attempt: item.AttemptCount, WorkerID: *item.LeaseOwner,
 			FencingToken: item.FencingToken, ExecutionKey: item.ExecutionKey}
@@ -377,6 +378,7 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 				return 0, err
 			}
 			failures = append(failures, fmt.Errorf("recover job %s: %w", item.ID, err))
+			failedIDs = append(failedIDs, item.ID)
 			continue
 		}
 		if err := savepoint.Commit(queryCtx); err != nil {
@@ -387,7 +389,10 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 	if err := tx.Commit(queryCtx); err != nil {
 		return 0, classify("commit lease recovery", err)
 	}
-	return recovered, errors.Join(failures...)
+	if len(failures) > 0 {
+		return recovered, &RecoveryError{JobIDs: failedIDs, Err: errors.Join(failures...)}
+	}
+	return recovered, nil
 }
 
 func scanJob(row rowScanner) (job.Job, error) {

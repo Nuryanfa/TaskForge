@@ -21,6 +21,8 @@ type workerStore struct {
 	failures          []job.Failure
 	completeErr       error
 	claimsAfterCancel int
+	recovered         int
+	recoverErr        error
 }
 
 func (s *workerStore) ClaimNextJob(ctx context.Context, workerID string, _ time.Duration) (job.Claimed, error) {
@@ -56,7 +58,11 @@ func (s *workerStore) FailJob(_ context.Context, _ job.Execution, failure job.Fa
 	s.failures = append(s.failures, failure)
 	return nil
 }
-func (s *workerStore) RecoverExpiredJobs(context.Context, int) (int, error)   { return 0, nil }
+func (s *workerStore) RecoverExpiredJobs(context.Context, int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recovered, s.recoverErr
+}
 func (s *workerStore) DispatchDueSchedules(context.Context, int) (int, error) { return 0, nil }
 
 func testOptions() Options {

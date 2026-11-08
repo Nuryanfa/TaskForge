@@ -99,6 +99,11 @@ func TestRecoveryIsolatesAFailingWorkflowJobIntegration(t *testing.T) {
 		if recovered > 1 {
 			t.Fatalf("recovered=%d", recovered)
 		}
+		var partial *RecoveryError
+		poisonedID := *getWorkflow(t, store, wf.ID).Steps[0].JobID
+		if !errors.As(err, &partial) || len(partial.JobIDs) != 1 || partial.JobIDs[0] != poisonedID {
+			t.Fatalf("recovery error does not name the poisoned job: %v", err)
+		}
 	}
 	bystander, err := store.GetJob(ctx, standalone.ID)
 	if err != nil || bystander.Status != job.StatusFailed || bystander.LastErrorCode == nil || *bystander.LastErrorCode != "LEASE_EXPIRED" {
