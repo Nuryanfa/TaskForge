@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -110,6 +111,15 @@ func (a *API) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, r, status, code, err.Error())
 		return
+	}
+	for _, step := range submission.Steps {
+		where := fmt.Sprintf("step %q: ", step.Name)
+		if !requireRegisteredKind(w, r, step.Kind, where) {
+			return
+		}
+		if step.Compensation != nil && !requireRegisteredKind(w, r, step.Compensation.Kind, where+"compensation ") {
+			return
+		}
 	}
 	created, isNew, err := a.store.CreateWorkflow(r.Context(), submission)
 	if err != nil {

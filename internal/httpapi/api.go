@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -254,6 +255,9 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, status, code, err.Error())
 		return
 	}
+	if !requireRegisteredKind(w, r, submission.Kind, "") {
+		return
+	}
 	createdJob, created, err := a.store.CreateJob(r.Context(), submission)
 	if err != nil {
 		a.writeStoreError(w, r, err)
@@ -410,6 +414,9 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request) {
 			code = "PAYLOAD_TOO_LARGE"
 		}
 		writeError(w, r, status, code, err.Error())
+		return
+	}
+	if !requireRegisteredKind(w, r, submission.Kind, "") {
 		return
 	}
 	created, isNew, err := a.store.CreateSchedule(r.Context(), submission)
@@ -625,6 +632,18 @@ func responseForJob(value job.Job) jobResponse {
 		ScheduleID: value.ScheduleID, ScheduledFor: value.ScheduledFor,
 		WorkflowID: value.WorkflowID, WorkflowRole: value.WorkflowRole,
 	}
+}
+
+// requireRegisteredKind rejects a kind this build has no handler for, so the
+// run-time failure UNKNOWN_JOB_KIND can only mean a deployment error. It runs
+// after structural validation, which keeps existing error codes unchanged.
+func requireRegisteredKind(w http.ResponseWriter, r *http.Request, kind, where string) bool {
+	if job.IsRegisteredKind(kind) {
+		return true
+	}
+	writeError(w, r, http.StatusBadRequest, "UNSUPPORTED_JOB_KIND",
+		fmt.Sprintf("%skind %q is not supported by this deployment", where, kind))
+	return false
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
