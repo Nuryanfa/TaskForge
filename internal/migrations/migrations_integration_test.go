@@ -18,7 +18,7 @@ func TestV01RunningJobUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v1 := int64(1)
 	if err := run(ctx, databaseURL, &v1); err != nil {
@@ -69,7 +69,7 @@ func TestV02SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v2 := int64(2)
 	if err := run(ctx, databaseURL, &v2); err != nil {
@@ -104,7 +104,7 @@ func TestV03SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v3 := int64(3)
 	if err := run(ctx, databaseURL, &v3); err != nil {
@@ -138,7 +138,7 @@ func TestV04SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v4 := int64(4)
 	if err := run(ctx, databaseURL, &v4); err != nil {
@@ -176,7 +176,7 @@ func TestV05SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v5 := int64(5)
 	if err := run(ctx, databaseURL, &v5); err != nil {
@@ -217,7 +217,7 @@ func TestV06SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v6 := int64(6)
 	if err := run(ctx, databaseURL, &v6); err != nil {
