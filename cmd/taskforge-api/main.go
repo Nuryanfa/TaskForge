@@ -47,6 +47,9 @@ func main() {
 		defer cancel()
 		_ = process.Shutdown(flushCtx)
 	}()
+	// The API settles workflows too (cancel with nothing to compensate), so it
+	// reports committed outcomes like the worker does.
+	store.SetObserver(process.Metrics)
 	dbCollector, refreshDB := telemetry.NewDBCollector(store.ObservabilitySnapshot, cfg.MetricsDBRefresh, logger)
 	process.Registry.MustRegister(dbCollector, telemetry.NewPoolCollector(store.PoolStats))
 	go refreshDB(ctx)
