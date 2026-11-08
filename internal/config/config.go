@@ -39,6 +39,9 @@ const (
 	defaultRetryMaxBackoff              = time.Minute
 	defaultRetryJitterPercent           = 20
 	defaultDeadLetterPageSize           = 50
+	defaultWorkflowMaxSteps             = 32
+	defaultWorkflowMaxBytes       int64 = 256 * 1024
+	defaultWorkflowPageSize             = 50
 	defaultNATSConnectTimeout           = 5 * time.Second
 	defaultNATSPublishTimeout           = 2 * time.Second
 	defaultNATSStream                   = "TASKFORGE_EVENTS"
@@ -62,6 +65,10 @@ const (
 	maximumJobAttempts                  = 100
 	maximumRetryBackoff                 = 30 * time.Minute
 	maximumDeadLetterPageSize           = 100
+	maximumWorkflowSteps                = 100
+	minimumWorkflowBytes          int64 = 1024
+	maximumWorkflowBytes          int64 = 4 * 1024 * 1024
+	maximumWorkflowPageSize             = 100
 	minimumNATSStreamMaxAge             = time.Minute
 	maximumNATSStreamMaxAge             = 365 * 24 * time.Hour
 	minimumNATSDuplicateWindow          = time.Second
@@ -107,6 +114,9 @@ type Config struct {
 	RetryMaxBackoff        time.Duration
 	RetryJitterPercent     int
 	DeadLetterPageSize     int
+	WorkflowMaxSteps       int
+	WorkflowMaxBytes       int64
+	WorkflowPageSize       int
 	NATSURL                string
 	NATSConnectTimeout     time.Duration
 	NATSPublishTimeout     time.Duration
@@ -149,6 +159,9 @@ func Load() (Config, error) {
 		RetryMaxBackoff:        defaultRetryMaxBackoff,
 		RetryJitterPercent:     defaultRetryJitterPercent,
 		DeadLetterPageSize:     defaultDeadLetterPageSize,
+		WorkflowMaxSteps:       defaultWorkflowMaxSteps,
+		WorkflowMaxBytes:       defaultWorkflowMaxBytes,
+		WorkflowPageSize:       defaultWorkflowPageSize,
 		NATSURL:                os.Getenv("TASKFORGE_NATS_URL"),
 		NATSConnectTimeout:     defaultNATSConnectTimeout,
 		NATSPublishTimeout:     defaultNATSPublishTimeout,
@@ -282,6 +295,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.DeadLetterPageSize, err = intFromEnv("TASKFORGE_DEAD_LETTER_PAGE_SIZE", cfg.DeadLetterPageSize, 1, maximumDeadLetterPageSize)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WorkflowMaxSteps, err = intFromEnv("TASKFORGE_WORKFLOW_MAX_STEPS", cfg.WorkflowMaxSteps, 1, maximumWorkflowSteps)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WorkflowMaxBytes, err = int64FromEnv("TASKFORGE_WORKFLOW_MAX_BYTES", cfg.WorkflowMaxBytes, minimumWorkflowBytes, maximumWorkflowBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WorkflowPageSize, err = intFromEnv("TASKFORGE_WORKFLOW_PAGE_SIZE", cfg.WorkflowPageSize, 1, maximumWorkflowPageSize)
 	if err != nil {
 		return Config{}, err
 	}
