@@ -242,14 +242,21 @@ func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy w
 func (s *Store) GetWorkflow(ctx context.Context, id string) (job.Workflow, error) {
 	queryCtx, cancel := s.queryContext(ctx)
 	defer cancel()
-	found, err := scanWorkflow(s.pool.QueryRow(queryCtx, `SELECT `+workflowColumns+` FROM workflows WHERE id=$1`, id))
+	// One snapshot for the workflow and its steps, so a reader never sees a
+	// workflow status that disagrees with its steps.
+	tx, err := s.pool.BeginTx(queryCtx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return job.Workflow{}, classify("begin workflow read", err)
+	}
+	defer tx.Rollback(queryCtx)
+	found, err := scanWorkflow(tx.QueryRow(queryCtx, `SELECT `+workflowColumns+` FROM workflows WHERE id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return job.Workflow{}, ErrNotFound
 	}
 	if err != nil {
 		return job.Workflow{}, classify("get workflow", err)
 	}
-	steps, err := loadSteps(queryCtx, s.pool, id)
+	steps, err := loadSteps(queryCtx, tx, id)
 	if err != nil {
 		return job.Workflow{}, err
 	}

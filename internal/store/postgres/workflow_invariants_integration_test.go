@@ -149,3 +149,42 @@ func TestAbortSurvivorIsCanceledOnNextEnginePassIntegration(t *testing.T) {
 	}
 	assertWorkflowInvariants(t, store, wf.ID)
 }
+
+// TestGetWorkflowReturnsAConsistentSnapshotIntegration reads workflows while
+// their only step completes. The workflow status and the step status must
+// always come from the same snapshot.
+func TestGetWorkflowReturnsAConsistentSnapshotIntegration(t *testing.T) {
+	store := workflowStore(t, 1)
+	ctx := context.Background()
+	for round := range 100 {
+		wf := submitWorkflow(t, store, step("only", "demo.echo"))
+		claimed := claimNext(t, store, "w")
+		done := make(chan struct{})
+		inconsistent := make(chan string, 1)
+		go func() {
+			defer close(done)
+			for {
+				read, err := store.GetWorkflow(ctx, wf.ID)
+				if err != nil {
+					inconsistent <- err.Error()
+					return
+				}
+				stepDone := read.Steps[0].Status == job.StepSucceeded
+				if stepDone != (read.Status == job.WorkflowSucceeded) {
+					inconsistent <- string(read.Status) + "/" + string(read.Steps[0].Status)
+					return
+				}
+				if read.Status.Terminal() {
+					return
+				}
+			}
+		}()
+		applyOutcome(t, store, claimed, succeed)
+		<-done
+		select {
+		case got := <-inconsistent:
+			t.Fatalf("round %d: inconsistent read %s", round, got)
+		default:
+		}
+	}
+}
