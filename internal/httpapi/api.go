@@ -16,7 +16,12 @@ import (
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
+	"github.com/Nuryanfa/TaskForge/internal/telemetry"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Store interface {
@@ -46,6 +51,7 @@ type API struct {
 	workflowMaxSteps   int
 	workflowMaxBytes   int64
 	workflowPageSize   int
+	metrics            *telemetry.Metrics
 }
 
 // Options configures the HTTP API. Zero workflow limits fall back to the
@@ -57,6 +63,8 @@ type Options struct {
 	WorkflowMaxSteps int
 	WorkflowMaxBytes int64
 	WorkflowPageSize int
+	// Metrics enables the tracing and metrics middleware; nil disables both.
+	Metrics *telemetry.Metrics
 }
 
 type errorEnvelope struct {
@@ -159,7 +167,7 @@ func NewWithOptions(store Store, opts Options) http.Handler {
 	}
 	api := &API{store: store, payloadMaxBytes: opts.PayloadMaxBytes, readinessTimeout: opts.ReadinessTimeout,
 		deadLetterPageSize: opts.PageSize, workflowMaxSteps: opts.WorkflowMaxSteps,
-		workflowMaxBytes: opts.WorkflowMaxBytes, workflowPageSize: opts.WorkflowPageSize}
+		workflowMaxBytes: opts.WorkflowMaxBytes, workflowPageSize: opts.WorkflowPageSize, metrics: opts.Metrics}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("GET /readyz", api.ready)
@@ -195,7 +203,13 @@ func NewWithOptions(store Store, opts Options) http.Handler {
 	mux.HandleFunc("/v1/workflows/{id}", api.methodNotAllowed)
 	mux.HandleFunc("/v1/workflows/{id}/cancel", api.methodNotAllowed)
 	mux.HandleFunc("/", api.notFound)
-	return api.withRequestID(mux)
+	// The telemetry middleware wraps the mux directly so the matched route
+	// pattern is visible to it after routing.
+	var root http.Handler = mux
+	if opts.Metrics != nil {
+		root = telemetry.Middleware(opts.Metrics, mux)
+	}
+	return api.withRequestID(root)
 }
 
 func (a *API) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
@@ -258,14 +272,24 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request) {
 	if !requireRegisteredKind(w, r, submission.Kind, "") {
 		return
 	}
-	createdJob, created, err := a.store.CreateJob(r.Context(), submission)
+	ctx, span := startSpan(r, "job.enqueue", trace.SpanKindProducer)
+	defer span.End()
+	createdJob, created, err := a.store.CreateJob(ctx, submission)
 	if err != nil {
+		span.SetStatus(codes.Error, "create job failed")
 		a.writeStoreError(w, r, err)
 		return
 	}
+	delayed := submission.RunAt != nil || submission.DelaySeconds != nil
+	span.SetAttributes(attribute.String("taskforge.job.id", createdJob.ID), attribute.String("taskforge.job.kind", submission.Kind),
+		attribute.String("taskforge.job.queue", submission.Queue), attribute.Bool("taskforge.job.delayed", delayed),
+		attribute.Bool("taskforge.job.created", created))
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
+		if a.metrics != nil {
+			a.metrics.JobSubmitted(submission.Queue, submission.Kind, delayed)
+		}
 	}
 	writeJSON(w, status, responseForJob(createdJob))
 }
@@ -361,7 +385,9 @@ func (a *API) redriveDeadLetter(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JOB_ID", "job ID must be a valid UUID")
 		return
 	}
-	created, isNew, err := a.store.RedriveDeadLetter(r.Context(), id)
+	ctx, span := startSpan(r, "job.redrive", trace.SpanKindInternal, attribute.String("taskforge.job.id", id))
+	defer span.End()
+	created, isNew, err := a.store.RedriveDeadLetter(ctx, id)
 	if err != nil {
 		a.writeStoreError(w, r, err)
 		return
@@ -637,6 +663,11 @@ func responseForJob(value job.Job) jobResponse {
 // requireRegisteredKind rejects a kind this build has no handler for, so the
 // run-time failure UNKNOWN_JOB_KIND can only mean a deployment error. It runs
 // after structural validation, which keeps existing error codes unchanged.
+// startSpan starts a span that is a child of the request's server span.
+func startSpan(r *http.Request, name string, kind trace.SpanKind, attributes ...attribute.KeyValue) (context.Context, trace.Span) {
+	return otel.Tracer(telemetry.TracerName).Start(r.Context(), name, trace.WithSpanKind(kind), trace.WithAttributes(attributes...))
+}
+
 func requireRegisteredKind(w http.ResponseWriter, r *http.Request, kind, where string) bool {
 	if job.IsRegisteredKind(kind) {
 		return true

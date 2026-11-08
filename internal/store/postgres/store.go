@@ -99,3 +99,6 @@ func classify(operation string, err error) error {
 	}
 	return fmt.Errorf("%s: %w", operation, err)
 }
+
+// PoolStats exposes connection pool statistics for metrics.
+func (s *Store) PoolStats() *pgxpool.Stat { return s.pool.Stat() }

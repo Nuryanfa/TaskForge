@@ -13,6 +13,8 @@ import (
 	"github.com/Nuryanfa/TaskForge/internal/job"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type createWorkflowRequest struct {
@@ -121,7 +123,12 @@ func (a *API) createWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	created, isNew, err := a.store.CreateWorkflow(r.Context(), submission)
+	ctx, span := startSpan(r, "workflow.submit", trace.SpanKindProducer, attribute.Int("taskforge.workflow.step_count", len(submission.Steps)))
+	defer span.End()
+	created, isNew, err := a.store.CreateWorkflow(ctx, submission)
+	if err == nil {
+		span.SetAttributes(attribute.String("taskforge.workflow.id", created.ID))
+	}
 	if err != nil {
 		a.writeWorkflowStoreError(w, r, err)
 		return
@@ -183,7 +190,9 @@ func (a *API) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	canceled, err := a.store.CancelWorkflow(r.Context(), id)
+	ctx, span := startSpan(r, "workflow.cancel", trace.SpanKindInternal, attribute.String("taskforge.workflow.id", id))
+	defer span.End()
+	canceled, err := a.store.CancelWorkflow(ctx, id)
 	if err != nil {
 		a.writeWorkflowStoreError(w, r, err)
 		return

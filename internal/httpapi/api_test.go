@@ -29,9 +29,11 @@ type fakeStore struct {
 	workflowCreated bool
 	workflowErr     error
 	lastWorkflow    job.WorkflowSubmission
+	lastCtx         context.Context
 }
 
-func (f *fakeStore) CreateJob(context.Context, job.Submission) (job.Job, bool, error) {
+func (f *fakeStore) CreateJob(ctx context.Context, _ job.Submission) (job.Job, bool, error) {
+	f.lastCtx = ctx
 	return f.value, f.created, f.err
 }
 func (f *fakeStore) GetJob(context.Context, string) (job.Job, error) { return f.value, f.err }
