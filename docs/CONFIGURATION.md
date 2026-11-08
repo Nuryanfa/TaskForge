@@ -27,7 +27,10 @@ Process legend: **A** = `taskforge-api`, **W** = `taskforge-worker`,
 | `TASKFORGE_READ_HEADER_TIMEOUT` | `5s` | ≤ `5m` | |
 | `TASKFORGE_WRITE_TIMEOUT` | `15s` | ≤ `5m` | |
 | `TASKFORGE_IDLE_TIMEOUT` | `60s` | ≤ `5m` | |
-| `TASKFORGE_DEAD_LETTER_PAGE_SIZE` | `50` | `1..100` | Default and maximum `limit`. |
+| `TASKFORGE_DEAD_LETTER_PAGE_SIZE` | `50` | `1..100` | Default and maximum `limit` for dead letters and schedules. |
+| `TASKFORGE_WORKFLOW_MAX_STEPS` | `32` | `1..100` | Steps per workflow. |
+| `TASKFORGE_WORKFLOW_MAX_BYTES` | `262144` | `1024..4194304` | `POST /v1/workflows` body limit; each step payload is still bounded by `TASKFORGE_JOB_PAYLOAD_MAX_BYTES`. |
+| `TASKFORGE_WORKFLOW_PAGE_SIZE` | `50` | `1..100` | Default and maximum `limit` for `GET /v1/workflows`. |
 
 ## Shared
 
@@ -71,7 +74,9 @@ Process legend: **A** = `taskforge-api`, **W** = `taskforge-worker`,
 
 These values are **snapshotted into each job when it is created**, so they take
 effect in the process that creates jobs: the API (and redrive copies the
-original snapshot). Changing them affects only new jobs.
+original snapshot). Changing them affects only new jobs. A workflow snapshots
+the policy once at creation and applies it to every action and compensation
+job, including the ones workers create later.
 
 | Variable | Default | Bounds | Notes |
 | --- | --- | --- | --- |
@@ -88,6 +93,7 @@ original snapshot). Changing them affects only new jobs.
 | `TASKFORGE_TEST_DATABASE_URL` | unset | Enables PostgreSQL integration tests; each test creates an isolated schema. |
 | `TASKFORGE_TEST_NATS_URL` | unset | Enables NATS JetStream integration and event end-to-end tests (also needs the database URL). |
 | `TASKFORGE_NATS_PORT` | `4222` | Host port for NATS mapped by `compose.yaml` (loopback only). |
+| `TASKFORGE_SOAK_SEED` | unset | Reproduces a specific run of the randomized workflow soak test. |
 
 ## Tuning guidance
 

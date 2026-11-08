@@ -415,7 +415,9 @@ func TestRetryDeadLetterAndRedriveIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	retrying, err := store.GetJob(ctx, created.ID)
-	if err != nil || retrying.Status != job.StatusQueued || !retrying.AvailableAt.After(time.Now().Add(-20*time.Millisecond)) {
+	// available_at and updated_at come from the same database NOW(); comparing
+	// against the test process clock is unreliable under host/VM clock skew.
+	if err != nil || retrying.Status != job.StatusQueued || retrying.AvailableAt.Sub(retrying.UpdatedAt) != 80*time.Millisecond {
 		t.Fatalf("retry state=%+v err=%v", retrying, err)
 	}
 	if _, err := store.ClaimNextJob(ctx, "early-worker", time.Second); !errors.Is(err, ErrNotFound) {

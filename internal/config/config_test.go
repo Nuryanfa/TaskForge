@@ -25,6 +25,7 @@ var environmentKeys = []string{
 	"TASKFORGE_NATS_STREAM", "TASKFORGE_NATS_STREAM_MAX_AGE", "TASKFORGE_NATS_DUPLICATE_WINDOW",
 	"TASKFORGE_OUTBOX_POLL_INTERVAL", "TASKFORGE_OUTBOX_BATCH_SIZE",
 	"TASKFORGE_OUTBOX_BATCH_TIMEOUT", "TASKFORGE_OUTBOX_RETENTION",
+	"TASKFORGE_WORKFLOW_MAX_STEPS", "TASKFORGE_WORKFLOW_MAX_BYTES", "TASKFORGE_WORKFLOW_PAGE_SIZE",
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -317,5 +318,42 @@ func clearEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range environmentKeys {
 		t.Setenv(key, "")
+	}
+}
+
+func TestLoadWorkflowDefaultsAndBounds(t *testing.T) {
+	clearEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkflowMaxSteps != 32 || cfg.WorkflowMaxBytes != 262144 || cfg.WorkflowPageSize != 50 {
+		t.Fatalf("workflow defaults: steps=%d bytes=%d page=%d", cfg.WorkflowMaxSteps, cfg.WorkflowMaxBytes, cfg.WorkflowPageSize)
+	}
+	t.Setenv("TASKFORGE_WORKFLOW_MAX_STEPS", "100")
+	t.Setenv("TASKFORGE_WORKFLOW_MAX_BYTES", "4194304")
+	t.Setenv("TASKFORGE_WORKFLOW_PAGE_SIZE", "1")
+	if cfg, err = Load(); err != nil || cfg.WorkflowMaxSteps != 100 || cfg.WorkflowMaxBytes != 4194304 || cfg.WorkflowPageSize != 1 {
+		t.Fatalf("workflow overrides cfg=%+v err=%v", cfg, err)
+	}
+	for key, value := range map[string]string{
+		"TASKFORGE_WORKFLOW_MAX_STEPS": "0", "TASKFORGE_WORKFLOW_PAGE_SIZE": "101",
+	} {
+		clearEnvironment(t)
+		t.Setenv(key, value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s=%s err=%v", key, value, err)
+		}
+	}
+	for _, value := range []string{"1023", "4194305", "101"} {
+		clearEnvironment(t)
+		t.Setenv("TASKFORGE_WORKFLOW_MAX_BYTES", value)
+		if value == "101" {
+			t.Setenv("TASKFORGE_WORKFLOW_MAX_BYTES", "")
+			t.Setenv("TASKFORGE_WORKFLOW_MAX_STEPS", value)
+		}
+		if _, err := Load(); err == nil {
+			t.Fatalf("value %s accepted", value)
+		}
 	}
 }

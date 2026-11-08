@@ -1,9 +1,9 @@
-# TaskForge data model (schema v5)
+# TaskForge data model (schema v6)
 
 PostgreSQL is the only durable store. The schema is defined by the embedded
 migrations in [`db/migrations`](../db/migrations) and applied by
 `taskforge-migrate` using goose. This document describes the schema after
-migration `000005`.
+migration `000006`.
 
 ## Entity relationships
 
@@ -14,6 +14,9 @@ erDiagram
     jobs ||--o| dead_letters : "may be dead-lettered"
     dead_letters |o--o| jobs : "redriven_job_id → new job"
     jobs ||--o{ outbox_events : "triggers record (no FK)"
+    workflows ||--|{ workflow_steps : "has steps"
+    workflow_steps ||--o| jobs : "job_id → action job"
+    workflow_steps ||--o| jobs : "compensation_job_id → compensation job"
 
     jobs {
         uuid id PK
@@ -91,6 +94,9 @@ erDiagram
 | `dead_lettered_at` | `TIMESTAMPTZ` | nullable | Set when the job enters the DLQ. |
 | `schedule_id` | `UUID` | nullable, FK → `schedules.id` `ON DELETE SET NULL` | Originating recurring schedule. |
 | `scheduled_for` | `TIMESTAMPTZ` | non-NULL when `schedule_id` is non-NULL | Target cron slot time. |
+| `workflow_id` | `UUID` | nullable, FK → `workflows.id` | Owning workflow. |
+| `workflow_step_id` | `BIGINT` | nullable, FK → `workflow_steps.id` | Owning step. |
+| `workflow_role` | `TEXT` | `action` or `compensation` | Which job of the step this is. |
 
 ### Invariants
 
@@ -102,6 +108,14 @@ erDiagram
   index on `(queue, idempotency_key) WHERE idempotency_key IS NOT NULL`.
 - **Schedule slot uniqueness (`jobs_schedule_slot_unique`)**: partial unique
   index on `(schedule_id, scheduled_for) WHERE schedule_id IS NOT NULL`.
+- **Workflow link (`jobs_workflow_link_check`)**: `workflow_id`,
+  `workflow_step_id`, and `workflow_role` are all NULL or all set.
+- **One job per step and role (`jobs_workflow_step_role_unique`)**: partial
+  unique index on `(workflow_step_id, workflow_role)`; the database backstop
+  for exactly-once dispatch.
+- Jobs dispatched by the workflow engine have `created_at = clock_timestamp()`
+  (insertion time), so they never appear to precede the dependency completion
+  that released them.
 
 ## `job_attempts`
 
@@ -174,6 +188,39 @@ Written only by the `taskforge_record_job_event()` trigger function, fired by
 Invariants: an outbox row exists if and only if its transition committed;
 rows with `published_at IS NULL` are never deleted.
 
+## `workflows`
+
+| Column | Type | Constraints | Purpose |
+| --- | --- | --- | --- |
+| `id` | `UUID` | PK | Workflow ID. |
+| `label` | `TEXT` | NULL or 1–128 chars | Free-form client label. |
+| `status` | `TEXT` | `running·compensating·succeeded·compensated·canceled·compensation_failed` | Current state. |
+| `abort_reason` | `TEXT` | `step_failed·canceled`; NULL iff `running`/`succeeded` | Why the workflow is compensating. |
+| `failed_step`, `error_code` | `TEXT` | code pattern | Step and failure code that aborted it. |
+| `idempotency_key` | `TEXT` | UNIQUE, NULL or 1–128 chars | Global submission key. Sensitive. |
+| `fingerprint` | `BYTEA` | 32 bytes | SHA-256 of the canonical definition. |
+| `step_count` | `SMALLINT` | `1..100` | Number of steps. |
+| `max_attempts`, `retry_*` | | same bounds as `jobs` | Retry snapshot for every workflow job. |
+| `created_at`, `updated_at` | `TIMESTAMPTZ` | default `NOW()` | Audit timestamps. |
+| `completed_at` | `TIMESTAMPTZ` | set iff terminal | Completion time. |
+
+## `workflow_steps`
+
+| Column | Type | Constraints | Purpose |
+| --- | --- | --- | --- |
+| `id` | `BIGINT` | identity PK | Step ID (referenced by `jobs.workflow_step_id`). |
+| `workflow_id` | `UUID` | FK → `workflows.id` | Owning workflow. |
+| `position` | `SMALLINT` | unique per workflow | Submission order. |
+| `name` | `TEXT` | identifier, unique per workflow | Step name. |
+| `queue`, `kind`, `priority`, `payload` | | as `jobs` | Action job definition. Payload is sensitive. |
+| `depends_on` | `TEXT[]` | | Direct dependencies by name. |
+| `remaining_dependencies` | `SMALLINT` | `>= 0` | Fan-in counter; the step is dispatched when it reaches 0. |
+| `status` | `TEXT` | `pending·dispatched·succeeded·failed·canceled·skipped` | Action state; `job_id` NULL iff `pending`/`skipped`. |
+| `job_id` | `UUID` | UNIQUE, FK → `jobs.id` | Action job. |
+| `compensation_queue/kind/priority/payload` | | all NULL or all set | Compensation definition. Payload is sensitive. |
+| `compensation_status` | `TEXT` | `none·waiting·dispatched·succeeded·failed·not_defined` | Compensation state; `compensation_job_id` set iff dispatched/succeeded/failed. |
+| `compensation_job_id` | `UUID` | UNIQUE, FK → `jobs.id` | Compensation job. |
+
 ## Indexes and the queries they serve
 
 | Index | Definition | Used by |
@@ -190,6 +237,10 @@ rows with `published_at IS NULL` are never deleted.
 | `schedules_list_index` | `(created_at DESC, id DESC)` | Keyset pagination in `ListSchedules`. |
 | `outbox_events_unpublished_index` | `(id) WHERE published_at IS NULL` | Relay batch read in id order; backlog count. |
 | `outbox_events_published_index` | `(published_at) WHERE published_at IS NOT NULL` | Retention purge. |
+| `jobs_workflow_step_role_unique` | `UNIQUE (workflow_step_id, workflow_role) WHERE workflow_step_id IS NOT NULL` | Exactly-once step dispatch. |
+| `jobs_workflow_queued_index` | `(workflow_id, id) WHERE workflow_id IS NOT NULL AND status='queued'` | Abort and cancel sweeps of queued actions. |
+| `workflows_list_index` | `(created_at DESC, id DESC)` | Keyset pagination in `ListWorkflows`. |
+| `workflow_steps_workflow_index` | `(workflow_id, position)` | Loading a workflow's steps. |
 
 ## Migration history
 
@@ -200,6 +251,7 @@ rows with `published_at IS NULL` are never deleted.
 | 3 | `000003_add_retry_and_dead_letters.sql` | v0.3 | Execution key, retry snapshot columns, `dead_lettered_at`, `dead_letters` table, retry eligibility and DLQ indexes. |
 | 4 | `000004_add_schedules.sql` | v0.4 | `schedules` table, `jobs.schedule_id` and `scheduled_for`, per-slot unique index, due/list indexes. |
 | 5 | `000005_add_outbox.sql` | v0.5 | `outbox_events` table, job event trigger function and triggers, unpublished/published indexes. Existing jobs are not backfilled. |
+| 6 | `000006_add_workflows.sql` | v0.6 | `workflows`, `workflow_steps`, job workflow link columns and indexes; job event snapshot gains `workflow_id`. Existing jobs stay standalone. |
 
 ### Migration rules
 

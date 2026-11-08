@@ -7,6 +7,7 @@
 | [CURRENT_STATE.md](CURRENT_STATE.md) | What is implemented today and what is not. |
 | [DESIGN.md](DESIGN.md) | How the system works: components, packages, protocols, concurrency, failure modes. |
 | [DATA_MODEL.md](DATA_MODEL.md) | The PostgreSQL schema, invariants, indexes, and migration history. |
+| [WORKFLOWS.md](WORKFLOWS.md) | Workflow DAGs, saga compensation, guarantees, and how to write idempotent compensations. |
 | [API.md](API.md) | The full HTTP contract, including every error code. |
 | [EVENTS.md](EVENTS.md) | The NATS JetStream job lifecycle event contract for consumers. |
 | [CONFIGURATION.md](CONFIGURATION.md) | Every environment variable with defaults, bounds, and tuning advice. |

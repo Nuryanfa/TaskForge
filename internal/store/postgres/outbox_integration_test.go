@@ -78,7 +78,7 @@ func TestOutboxRecordsSuccessfulLifecycleIntegration(t *testing.T) {
 	assertEventTypes(t, events, "job.queued", "job.started", "job.succeeded")
 
 	wantKeys := []string{"attempt", "available_at", "dead_lettered", "error_code", "job_id",
-		"kind", "max_attempts", "priority", "queue", "schedule_id", "status"}
+		"kind", "max_attempts", "priority", "queue", "schedule_id", "status", "workflow_id"}
 	for _, event := range events {
 		var keys []string
 		for k := range event.Payload {

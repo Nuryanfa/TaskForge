@@ -3,10 +3,12 @@
 ## Problem
 
 Applications need durable asynchronous work without hiding failure behavior.
-TaskForge v0.5 makes the job lifecycle observable without polling: every
-state change produces a durable, privacy-safe event on NATS JetStream through a
-transactional outbox, and workers can react to new work immediately, while
-PostgreSQL keeps sole authority over ownership, retry, and failure.
+TaskForge v0.5 made the job lifecycle observable without polling through a
+transactional outbox and NATS JetStream. v0.6 lets applications run several
+dependent jobs as one workflow and undo completed work when a later step fails
+(saga compensation), with workflow state advancing in the same PostgreSQL
+transaction as each job outcome, so PostgreSQL keeps sole authority over
+ownership, retry, failure, and workflow progress.
 
 ## Product principles
 
@@ -16,7 +18,7 @@ PostgreSQL keeps sole authority over ownership, retry, and failure.
 4. Correctness-sensitive SQL is explicit and tested against real PostgreSQL.
 5. Payloads, results, idempotency keys, and database credentials are sensitive.
 
-## Implemented through v0.5
+## Implemented through v0.6
 
 - Embedded, versioned PostgreSQL migrations and a dedicated migration command.
 - Bounded `pgxpool` connection pooling and database operations.
@@ -38,7 +40,11 @@ PostgreSQL keeps sole authority over ownership, retry, and failure.
 - Stable execution idempotency keys across attempts and redrive.
 - Payload-free PostgreSQL dead letters with cursor pagination and transactional,
   idempotent redrive into a new job.
-- A bounded, built-in `demo.echo` handler registry.
+- A bounded, built-in handler registry: `demo.echo`, `demo.fail`,
+  `demo.flaky`, and `demo.sleep`.
+- Workflow DAGs of ordinary jobs with fan-out/fan-in, idempotent submission,
+  whole-workflow cancel, and saga compensation in reverse dependency order,
+  advanced in the same transaction as each job outcome.
 - Process liveness and bounded database-aware readiness.
 - Graceful API and worker shutdown.
 - Docker Compose startup ordering and non-root application containers.
@@ -63,6 +69,10 @@ GET    /v1/schedules/{id}
 POST   /v1/schedules/{id}/pause
 POST   /v1/schedules/{id}/resume
 DELETE /v1/schedules/{id}
+POST   /v1/workflows
+GET    /v1/workflows
+GET    /v1/workflows/{id}
+POST   /v1/workflows/{id}/cancel
 GET    /healthz
 GET    /readyz
 ```
@@ -98,9 +108,11 @@ side effect and crash before persisting success; lease recovery may then run
 the handler again. Fencing protects TaskForge's PostgreSQL state only. Handler
 integrations need idempotency keys or downstream fencing for their own effects.
 
-v0.5 excludes exactly-once event delivery, dispatching jobs through NATS,
-workflow DAGs, authentication or multitenancy, Kubernetes, and full
-observability.
+v0.6 excludes exactly-once event delivery, dispatching jobs through NATS,
+data flow or conditional branches between workflow steps, workflow-level
+events, authentication or multitenancy, Kubernetes, and full observability.
+Workflow steps and compensations are at least once; compensations must be
+idempotent.
 
 ## Acceptance criteria
 
@@ -126,6 +138,13 @@ observability.
 - Events for one job are published in transition order; duplicates carry the
   same `Nats-Msg-Id` and `event_id`.
 - NATS unavailability never blocks job submission or execution.
+- A workflow step's job is created exactly once and only after all of its
+  dependencies succeeded, including when they finish concurrently.
+- A failed or canceled workflow compensates every succeeded step exactly once,
+  in reverse dependency order, and never compensates a failed step.
+- Workflow advancement, lease recovery, and cancel never deadlock, and one
+  workflow that cannot advance never blocks lease recovery of other jobs.
+- Workflow invariants I1–I9 hold after randomized soak runs with crashes.
 
 ## Roadmap
 
@@ -136,6 +155,6 @@ observability.
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue (implemented) |
 | v0.4 | Delayed and recurring scheduling (implemented) |
 | v0.5 | Transactional outbox and NATS JetStream (implemented) |
-| v0.6 | Workflow DAGs and saga compensation |
+| v0.6 | Workflow DAGs and saga compensation (implemented) |
 | v0.7 | Metrics, tracing, dashboards, and SLOs |
 | v0.8 | High availability, Kubernetes, load, and chaos testing |

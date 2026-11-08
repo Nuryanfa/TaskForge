@@ -3,7 +3,7 @@
 TaskForge is an educational, production-like portfolio project and is not yet
 production ready.
 
-v0.5 has no authentication, authorization, TLS termination, tenant isolation,
+v0.6 has no authentication, authorization, TLS termination, tenant isolation,
 or rate limiting. The Compose NATS server has no authentication either; events
 carry no payloads or keys, but job metadata is still visible to anyone who can
 reach NATS. Dead-letter redrive and schedule management are likewise unauthenticated. Run it only on loopback or a trusted development network; do

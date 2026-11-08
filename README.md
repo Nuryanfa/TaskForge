@@ -1,16 +1,18 @@
 # TaskForge
 
-TaskForge v0.5 is a durable PostgreSQL-backed background job platform written
+TaskForge v0.6 is a durable PostgreSQL-backed background job platform written
 in Go. It provides bounded leased execution, retry scheduling with deterministic
 jitter, stable execution idempotency keys, a PostgreSQL dead-letter queue,
-client-controlled delayed and recurring cron scheduling, and job lifecycle
-events published to NATS JetStream through a transactional outbox.
+client-controlled delayed and recurring cron scheduling, job lifecycle events
+published to NATS JetStream through a transactional outbox, and workflow DAGs
+with saga compensation that advance in the same transaction as each job
+outcome.
 
 > TaskForge is an educational portfolio project. It is not production ready,
 > does not promise exactly-once execution, and must not be exposed directly to
 > an untrusted public network.
 
-## v0.5 architecture
+## v0.6 architecture
 
 ```mermaid
 flowchart LR
@@ -36,6 +38,12 @@ NATS JetStream in order with deduplication IDs, so an event exists if and only
 if its state change committed. Workers can use `job.queued` events as wake-up
 hints instead of waiting for the next poll; NATS never decides job ownership.
 See [docs/EVENTS.md](docs/EVENTS.md) for the event contract.
+
+Workflows group jobs into a dependency graph. When a workflow job reaches a
+terminal state, the same transaction updates the workflow: it starts the steps
+whose dependencies are now all satisfied, or, after a failure or cancel, runs
+the compensations of succeeded steps in reverse dependency order. See
+[docs/WORKFLOWS.md](docs/WORKFLOWS.md).
 
 ## Job lifecycle
 
@@ -140,6 +148,17 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/dead-letters/<job-id>
 Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/dead-letters/<job-id>/redrive
 ```
 
+Run a workflow whose last step fails, then watch the saga compensate
+(`demo.fail` always fails permanently):
+
+```powershell
+curl.exe -i -X POST http://127.0.0.1:8080/v1/workflows `
+  -H "Content-Type: application/json" `
+  --data '{"label":"order-1042","steps":[{"name":"reserve","kind":"demo.echo","payload":{"message":"reserve"},"compensation":{"kind":"demo.echo","payload":{"message":"release"}}},{"name":"ship","kind":"demo.fail","payload":{},"depends_on":["reserve"]}]}'
+Invoke-RestMethod http://127.0.0.1:8080/v1/workflows/<workflow-id>
+Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/workflows/<workflow-id>/cancel
+```
+
 GET responses exclude payloads and idempotency keys. Result metadata reports
 only whether a bounded result exists and its byte count. Errors use a stable
 JSON envelope with a machine code and request ID; raw PostgreSQL errors are not
@@ -223,12 +242,12 @@ CI supplies a real PostgreSQL service and runs the suite with the race detector.
 
 ## Security limitations
 
-v0.5 has no authentication, authorization, TLS termination, multi-tenancy, or
+v0.6 has no authentication, authorization, TLS termination, multi-tenancy, or
 rate limiting, and the Compose NATS server has no authentication. Bind it to loopback or a trusted development network only. Job
 payloads and results are potentially sensitive; the public GET API deliberately
 does not expose them. See [SECURITY.md](SECURITY.md).
 
-## Known v0.5 limitations
+## Known v0.6 limitations
 
 - Delivery is at least once; PostgreSQL fencing cannot fence external systems.
 - Retry is bounded but still at least once; redrive can execute logical work
@@ -239,7 +258,10 @@ does not expose them. See [SECURITY.md](SECURITY.md).
   `event_id`. Only job transitions produce events (not schedule changes).
 - One relay publishes at a time, synchronously (throughput is bounded by one
   NATS round trip per event).
-- No gRPC, workflows, Kubernetes, web UI, Prometheus, or OpenTelemetry.
+- Workflow steps and compensations are at least once; there is no data flow
+  between steps, no conditional branching, and redrive does not resume a
+  workflow.
+- No gRPC, Kubernetes, web UI, Prometheus, or OpenTelemetry.
 - Submission idempotency does not guarantee idempotent execution side effects.
 
 ## Roadmap
@@ -251,7 +273,7 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.3 | Retry scheduling, execution idempotency, and dead-letter queue | Implemented |
 | v0.4 | Delayed and recurring scheduling | Implemented |
 | v0.5 | Transactional outbox and NATS JetStream | Implemented |
-| v0.6 | Workflow DAGs and saga compensation | Planned |
+| v0.6 | Workflow DAGs and saga compensation | Implemented |
 | v0.7 | Metrics, tracing, dashboards, and SLOs | Planned |
 | v0.8 | High availability, Kubernetes, load, and chaos testing | Planned |
 
@@ -261,6 +283,7 @@ Start at the [documentation index](docs/README.md). Key documents:
 
 - [Product requirements](docs/PRD.md) and [current state](docs/CURRENT_STATE.md)
 - [System design](docs/DESIGN.md) and [data model](docs/DATA_MODEL.md)
+- [Workflows and saga compensation](docs/WORKFLOWS.md)
 - [HTTP API reference](docs/API.md), [event contract](docs/EVENTS.md), and [configuration reference](docs/CONFIGURATION.md)
 - [Operations guide](docs/OPERATIONS.md) and [testing strategy](docs/TESTING.md)
 - [Architecture decision records](docs/adr/README.md)

@@ -126,10 +126,18 @@ func (r *Runner) runRecovery(ctx context.Context) {
 		case <-timer.C:
 		}
 		recovered, err := r.store.RecoverExpiredJobs(ctx, r.options.RecoveryBatchSize)
-		if err != nil && ctx.Err() == nil {
-			r.logger.Error("worker_recovery_failed")
-		} else if recovered > 0 {
+		if recovered > 0 {
 			r.logger.Info("worker_jobs_recovered", "count", recovered)
+		}
+		if err != nil && ctx.Err() == nil {
+			// Job IDs identify what an operator must inspect; the raw error
+			// may contain database detail and is never logged.
+			var partial *postgres.RecoveryError
+			if errors.As(err, &partial) {
+				r.logger.Error("worker_recovery_partial", "failed_count", len(partial.JobIDs), "failed_job_ids", partial.JobIDs)
+			} else {
+				r.logger.Error("worker_recovery_failed")
+			}
 		}
 		resetTimer(timer, r.options.RecoveryInterval)
 	}

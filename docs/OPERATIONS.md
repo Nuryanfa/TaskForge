@@ -76,7 +76,8 @@ results, keys, and DSNs are never logged.
 | `worker_claim_failed` | error | W | Claim query failed (other than "no job"); usually DB availability. |
 | `worker_heartbeat_failed` | error | W | Lease renewal failed for a reason other than lost ownership; execution was cancelled. |
 | `worker_persist_outcome_failed` | error | W | Could not write success/failure; job will be recovered after lease expiry. |
-| `worker_recovery_failed` | error | W | Recovery transaction failed. |
+| `worker_recovery_failed` | error | W | Recovery transaction failed as a whole (usually database availability). |
+| `worker_recovery_partial` | error | W | Some jobs in a recovery batch were rolled back; `failed_job_ids` lists them and the rest of the batch was recovered. |
 | `worker_jobs_recovered` | info | W | `count` expired leases were requeued or dead-lettered. Frequent occurrences mean crashes or a lease that is too short. |
 | `worker_schedule_dispatch_failed` | error | W | Recurring schedule dispatch transaction failed. |
 | `worker_schedules_dispatched` | info | W | `count` due schedules materialized into queued jobs. |
@@ -96,6 +97,8 @@ Codes stored in `jobs.last_error_code`, `job_attempts.error_code`, and
 | `INVALID_JOB_PAYLOAD` | no | `demo.echo` | Payload missing `message` or has extra fields. |
 | `RESULT_TOO_LARGE` | no | `demo.echo` | Result exceeds `TASKFORGE_JOB_RESULT_MAX_BYTES`. |
 | `RESULT_ENCODING_FAILED` | no | `demo.echo` | Result could not be encoded. |
+| `DEMO_FAILURE` | no | `demo.fail` | Deliberate permanent failure (or the payload's custom `code`). |
+| `DEMO_TRANSIENT` | yes | `demo.flaky` | Deliberate retryable failure for the first `fail_attempts` attempts. |
 | `V01_MIGRATION_RECOVERY` | — | migration 2 | Attempt closed while upgrading from v0.1. |
 
 ## Runbooks
@@ -129,6 +132,39 @@ Codes stored in `jobs.last_error_code`, `job_attempts.error_code`, and
   worker is running.
 - If the lease keeps getting renewed, the handler is still executing; it is
   bounded by `TASKFORGE_JOB_EXECUTION_TIMEOUT`.
+
+### Workflow ended `compensation_failed`
+
+A compensation job was dead-lettered. TaskForge stops starting further
+compensations, so some succeeded steps may still be uncompensated.
+
+1. `GET /v1/workflows/{id}`: steps whose `compensation.status` is `failed` are
+   the cause; steps still `waiting` were never compensated.
+2. Find the failed compensation in the DLQ by its `job_id`
+   (`GET /v1/dead-letters/{job-id}`) and fix the cause.
+3. Redrive it (`POST /v1/dead-letters/{job-id}/redrive`). This creates a
+   **standalone** job with the same payload and execution key but **without
+   workflow context**: the handler does not receive the action's execution key
+   and must rely on the reference in its payload (see
+   [WORKFLOWS.md](WORKFLOWS.md#writing-an-idempotent-compensation)). The
+   workflow status does not change.
+4. For steps still `waiting`, undo their effects by submitting standalone jobs
+   (`POST /v1/jobs`) whose payload carries the business reference the handler
+   needs, or reverse them in the downstream system directly. Execution keys are
+   never exposed by the API, so they cannot be passed by hand.
+
+### Workflow seems stuck in `running` or `compensating`
+
+- A non-terminal workflow always has at least one `queued` or `running` job.
+  Check them with the SQL below; they follow the normal job runbooks.
+- A step waiting in retry backoff keeps the workflow `running` until it
+  succeeds or is dead-lettered.
+- `worker_recovery_partial` lists jobs whose recovery was rolled back, most
+  often because a workflow's rows were edited by hand. Recovery skips those
+  jobs and continues with the rest. Inspect each listed job with
+  `GET /v1/jobs/{id}` and its workflow with the SQL below, then restore the
+  workflow rows. Until then the job stays `running` with an expired lease and
+  is retried on every recovery pass.
 
 ### Outbox backlog is growing
 
@@ -166,13 +202,24 @@ FROM job_attempts WHERE job_id = $1 ORDER BY attempt;
 Avoid manual `UPDATE`s on `jobs`. They can violate the lease invariant or the
 fencing trigger and bypass the attempt history.
 
+Workflow state and its live jobs:
+
+```sql
+SELECT s.position, s.name, s.status, s.compensation_status, j.status AS job_status, c.status AS compensation_job_status
+FROM workflow_steps s
+LEFT JOIN jobs j ON j.id = s.job_id
+LEFT JOIN jobs c ON c.id = s.compensation_job_id
+WHERE s.workflow_id = $1 ORDER BY s.position;
+```
+
 ## Backup and retention
 
 - All state is in PostgreSQL; standard PostgreSQL backups (for example
   `pg_dump` or base backups with WAL archiving) cover TaskForge entirely.
 - Published `outbox_events` rows are purged after `TASKFORGE_OUTBOX_RETENTION`;
   JetStream keeps messages for `TASKFORGE_NATS_STREAM_MAX_AGE`.
-- v0.5 has no other automatic retention. `jobs`, `job_attempts`, and `dead_letters`
-  grow without bound. Archive or delete terminal rows manually only when no
-  dead-letter row references them.
+- v0.6 has no other automatic retention. `jobs`, `job_attempts`,
+  `dead_letters`, `workflows`, and `workflow_steps` grow without bound. Archive
+  or delete terminal rows manually only when no dead-letter row or workflow
+  step references them.
 - Backups contain payloads and results; treat them as sensitive.
