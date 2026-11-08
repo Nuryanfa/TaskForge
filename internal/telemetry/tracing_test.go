@@ -189,3 +189,38 @@ func TestNoopTracingDoesNotForwardStoredParent(t *testing.T) {
 		t.Fatalf("tracing disabled but the attempt forwarded stored parent %s", *got)
 	}
 }
+
+// TestShutdownBoundedWithManyQueuedBatches queues several batches against a
+// collector that accepts connections but never answers: the flush as a whole,
+// not each batch, must stay within the export timeout.
+func TestShutdownBoundedWithManyQueuedBatches(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-time.After(30 * time.Second):
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	shutdown, err := SetupTracing(context.Background(), TracingConfig{
+		Endpoint: server.URL, SampleRatio: 1, ExportTimeout: 300 * time.Millisecond,
+		BatchTimeout: time.Hour, ServiceName: "test",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2000 {
+		_, span := StartAttempt(context.Background(), claimedJob(nil, false))
+		span.End()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	_ = shutdown(ctx)
+	if elapsed := time.Since(started); elapsed > 800*time.Millisecond {
+		t.Fatalf("flushing 4 batches to a hanging collector took %s; the export timeout is 300ms", elapsed)
+	}
+}

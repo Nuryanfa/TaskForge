@@ -88,7 +88,16 @@ func SetupTracing(ctx context.Context, cfg TracingConfig, failures prometheus.Co
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", cfg.ServiceName))),
 	)
 	otel.SetTracerProvider(provider)
-	return provider.Shutdown, nil
+	// The batch processor flushes its queue one batch at a time, each with its
+	// own export timeout, so a hanging collector could stretch shutdown by one
+	// timeout per queued batch. Bound the whole flush by one export timeout
+	// plus half of one, so the batch in flight can fail and be counted; spans
+	// still queued after that are dropped.
+	return func(ctx context.Context) error {
+		flushCtx, cancel := context.WithTimeout(ctx, cfg.ExportTimeout+cfg.ExportTimeout/2)
+		defer cancel()
+		return provider.Shutdown(flushCtx)
+	}, nil
 }
 
 func tracesURL(endpoint string) (string, error) {
