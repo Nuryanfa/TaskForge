@@ -64,6 +64,20 @@ type Execution struct {
 	WorkerID     string
 	FencingToken int64
 	ExecutionKey string
+	// Workflow is set for jobs that belong to a workflow; nil otherwise.
+	Workflow *WorkflowContext
+}
+
+// WorkflowContext tells a handler which workflow step it runs. For a
+// compensation, CompensatesExecutionKey is the execution key of the action it
+// undoes, so the handler can ask its downstream to reverse exactly that
+// effect. It is passed to handlers only and never exposed or logged.
+type WorkflowContext struct {
+	WorkflowID              string
+	Step                    string
+	Role                    string
+	CompensatesJobID        string
+	CompensatesExecutionKey string
 }
 
 type Failure struct {

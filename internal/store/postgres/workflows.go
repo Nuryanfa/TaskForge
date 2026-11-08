@@ -294,3 +294,54 @@ func (s *Store) ListWorkflows(ctx context.Context, before *time.Time, beforeID s
 	}
 	return items, hasMore, nil
 }
+
+// loadWorkflowContext builds the handler-visible workflow metadata of a
+// claimed workflow job. A compensation also learns the action it undoes.
+func loadWorkflowContext(ctx context.Context, tx pgx.Tx, claimed job.Job) (job.WorkflowContext, error) {
+	result := job.WorkflowContext{WorkflowID: *claimed.WorkflowID, Role: *claimed.WorkflowRole}
+	var actionJobID, actionKey *string
+	err := tx.QueryRow(ctx, `SELECT s.name, a.id, a.execution_idempotency_key
+		FROM workflow_steps s LEFT JOIN jobs a ON a.id = s.job_id WHERE s.id=$1`, *claimed.WorkflowStepID).
+		Scan(&result.Step, &actionJobID, &actionKey)
+	if err != nil {
+		return job.WorkflowContext{}, classify("load workflow context", err)
+	}
+	if result.Role == job.RoleCompensation && actionJobID != nil && actionKey != nil {
+		result.CompensatesJobID, result.CompensatesExecutionKey = *actionJobID, *actionKey
+	}
+	return result, nil
+}
+
+// CancelWorkflow aborts a running workflow: pending steps are skipped, queued
+// actions canceled, and succeeded steps compensated in reverse order. Lock
+// order: the workflow's queued jobs first, then the workflow row.
+func (s *Store) CancelWorkflow(ctx context.Context, id string) (job.Workflow, error) {
+	queryCtx, cancel := s.queryContext(ctx)
+	defer cancel()
+	tx, err := s.pool.BeginTx(queryCtx, pgx.TxOptions{})
+	if err != nil {
+		return job.Workflow{}, classify("begin workflow cancel", err)
+	}
+	defer tx.Rollback(queryCtx)
+	if _, err := tx.Exec(queryCtx, `SELECT id FROM jobs WHERE workflow_id=$1 AND status='queued'
+		ORDER BY id FOR UPDATE`, id); err != nil {
+		return job.Workflow{}, classify("lock queued workflow jobs", err)
+	}
+	wf, err := lockWorkflow(queryCtx, tx, id)
+	if err != nil {
+		return job.Workflow{}, err
+	}
+	if wf.status != job.WorkflowRunning {
+		return job.Workflow{}, ErrStateConflict
+	}
+	if err := abortWorkflow(queryCtx, tx, id, job.AbortCanceled, nil, nil); err != nil {
+		return job.Workflow{}, err
+	}
+	if err := settleWorkflow(queryCtx, tx, id); err != nil {
+		return job.Workflow{}, err
+	}
+	if err := tx.Commit(queryCtx); err != nil {
+		return job.Workflow{}, classify("commit workflow cancel", err)
+	}
+	return s.GetWorkflow(ctx, id)
+}

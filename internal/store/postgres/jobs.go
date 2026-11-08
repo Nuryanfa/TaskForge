@@ -141,6 +141,13 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string, leaseDuration
 	}
 	execution := job.Execution{JobID: claimedJob.ID, Attempt: claimedJob.AttemptCount,
 		WorkerID: workerID, FencingToken: claimedJob.FencingToken, ExecutionKey: claimedJob.ExecutionKey}
+	if claimedJob.WorkflowID != nil {
+		workflowContext, err := loadWorkflowContext(queryCtx, tx, claimedJob)
+		if err != nil {
+			return job.Claimed{}, err
+		}
+		execution.Workflow = &workflowContext
+	}
 	if _, err := tx.Exec(queryCtx, `INSERT INTO job_attempts
         (job_id, attempt, worker_id, started_at, fencing_token)
         VALUES ($1, $2, $3, $4, $5)`, execution.JobID, execution.Attempt,
