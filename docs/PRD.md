@@ -18,7 +18,7 @@ ownership, retry, failure, and workflow progress.
 4. Correctness-sensitive SQL is explicit and tested against real PostgreSQL.
 5. Payloads, results, idempotency keys, and database credentials are sensitive.
 
-## Implemented through v0.6
+## Implemented through v0.7
 
 - Embedded, versioned PostgreSQL migrations and a dedicated migration command.
 - Bounded `pgxpool` connection pooling and database operations.
@@ -53,6 +53,12 @@ ownership, retry, failure, and workflow progress.
   JetStream with a single active relay and bounded retention.
 - Optional NATS wake-ups for workers with polling as the fallback.
 - Unit, PostgreSQL and NATS integration, race, and in-process end-to-end tests.
+
+- Connected tracing through the database (one trace per job across API,
+  PostgreSQL, worker, and workflow steps), bounded Prometheus metrics,
+  start-latency and reliability SLOs with tested burn-rate alerts, a Grafana
+  dashboard, and an SLO burn demo.
+- Submission rejects job kinds that have no handler in the deployment.
 
 ## API
 
@@ -108,9 +114,10 @@ side effect and crash before persisting success; lease recovery may then run
 the handler again. Fencing protects TaskForge's PostgreSQL state only. Handler
 integrations need idempotency keys or downstream fencing for their own effects.
 
-v0.6 excludes exactly-once event delivery, dispatching jobs through NATS,
+v0.7 excludes exactly-once event delivery, dispatching jobs through NATS,
 data flow or conditional branches between workflow steps, workflow-level
-events, authentication or multitenancy, Kubernetes, and full observability.
+events, trace propagation through NATS, the API-availability SLO,
+authentication or multitenancy, and Kubernetes.
 Workflow steps and compensations are at least once; compensations must be
 idempotent.
 
@@ -146,6 +153,16 @@ idempotent.
   workflow that cannot advance never blocks lease recovery of other jobs.
 - Workflow invariants I1–I9 hold after randomized soak runs with crashes.
 
+- A job's worker attempts appear in the trace of its submission (or linked
+  to it for client-delayed jobs); a workflow's steps and compensations form a
+  causal chain.
+- Jobs complete normally with tracing disabled or the trace collector down.
+- No metric label carries a job ID, workflow ID, unlisted queue, or
+  unregistered kind.
+- Start latency is measured from readiness on the database clock; handler
+  failures do not burn the platform reliability budget.
+- Every SLO alert has a `promtool` test, including minimum-volume silence.
+
 ## Roadmap
 
 | Version | Scope |
@@ -156,5 +173,5 @@ idempotent.
 | v0.4 | Delayed and recurring scheduling (implemented) |
 | v0.5 | Transactional outbox and NATS JetStream (implemented) |
 | v0.6 | Workflow DAGs and saga compensation (implemented) |
-| v0.7 | Metrics, tracing, dashboards, and SLOs |
+| v0.7 | Metrics, tracing, dashboards, and SLOs (implemented) |
 | v0.8 | High availability, Kubernetes, load, and chaos testing |

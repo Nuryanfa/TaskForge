@@ -1,4 +1,4 @@
-# TaskForge system design (v0.6)
+# TaskForge system design (v0.7)
 
 This document describes how TaskForge is built: its components, package
 structure, concurrency model, the transactional protocols behind every job
@@ -24,10 +24,13 @@ Goals:
 - Workflow DAGs with saga compensation whose state is exactly as consistent as
   job state.
 
-Non-goals for v0.6: exactly-once execution or delivery, dispatching jobs
+- Operable with measurable targets: one trace per job across processes,
+  bounded metrics, and SLOs with tested alerts (v0.7).
+
+Non-goals for v0.7: exactly-once execution or delivery, dispatching jobs
 through the broker, data flow or conditional branches between workflow steps,
-authentication, multi-tenancy, metrics/tracing, and execution of arbitrary user
-code.
+trace propagation through NATS, authentication, multi-tenancy, and execution
+of arbitrary user code.
 
 ## 2. Component view
 
@@ -392,6 +395,28 @@ Key mechanics:
   workflow lock while a dependency completed.
 - **Consistent reads:** `GetWorkflow` reads the workflow and its steps in one
   read-only REPEATABLE READ transaction.
+
+### 5.10 Observability
+
+Full catalog in [OBSERVABILITY.md](OBSERVABILITY.md); decision in
+[ADR 0013](adr/0013-trace-context-through-the-database.md); targets in
+[SLO.md](SLO.md).
+
+- **Trace context in the row.** Every job-creating statement stores
+  `tracectx.FromContext(ctx)` as `trace_parent`; `trace_link` is computed in
+  SQL (`available_at > NOW()` at insertion). `internal/tracectx` and the store
+  use only the OpenTelemetry API; exporters and sampling live in
+  `internal/telemetry`.
+- **Attempt spans.** `telemetry.StartAttempt` makes the attempt a child of the
+  stored context, a linked root for delayed jobs, or a new root. The worker
+  attaches the span to its handler and persistence contexts explicitly, so the
+  workflow engine stamps it on every job it dispatches in that transaction.
+- **After-commit observer.** The store buffers outcomes per transaction and
+  per recovery savepoint and reports them to `telemetry.Metrics` only after
+  commit.
+- **Isolation.** Batch export with a bounded queue, timeout, and no retries;
+  failures are counted and logged once a minute. Metrics listeners are separate
+  from the API listener and fail startup if they cannot bind.
 
 ## 6. Worker concurrency model
 

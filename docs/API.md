@@ -1,4 +1,4 @@
-# TaskForge HTTP API reference (v0.6)
+# TaskForge HTTP API reference (v0.7)
 
 Base URL in development: `http://127.0.0.1:8080`. All request and response
 bodies are JSON. There is no authentication in v0.5; do not expose the API to
@@ -73,6 +73,14 @@ Returned by every job endpoint and by redrive.
 
 Never returned: `payload`, `result`, `idempotency_key`, execution key, lease
 owner, fencing token.
+
+## Telemetry
+
+`/metrics` is **not** served on the API listener (it returns `404`); each
+process serves metrics on its own loopback listener (see
+[OBSERVABILITY.md](OBSERVABILITY.md)). A client `traceparent` header is
+accepted but never used as the parent of TaskForge's spans; it is recorded as
+a span link.
 
 ## Endpoints
 
@@ -232,9 +240,9 @@ as `POST /v1/jobs`. Unknown fields are rejected at every level.
 | `steps[].depends_on` | string[] | no | Existing step names, no duplicates or self reference; the graph must be acyclic. |
 | `steps[].compensation` | object | no | `{kind, payload, queue?, priority?}`; queue and priority default to the step's. |
 
-Delayed timing (`run_at`, `delay_seconds`) is not supported on steps. An
-unregistered `kind` is accepted and fails at run time with `UNKNOWN_JOB_KIND`,
-which aborts the workflow. Creation inserts the workflow, every step, and the
+Delayed timing (`run_at`, `delay_seconds`) is not supported on steps. Every
+step and compensation `kind` must be registered in this deployment, or the
+request fails with `400 UNSUPPORTED_JOB_KIND`. Creation inserts the workflow, every step, and the
 jobs of all steps without dependencies in one transaction.
 
 | Status | When |
@@ -309,6 +317,7 @@ finish and are compensated if they succeed.
 | HTTP | Code | Meaning |
 | --- | --- | --- |
 | 400 | `INVALID_REQUEST_ID` | `X-Request-ID` is malformed. |
+| 400 | `UNSUPPORTED_JOB_KIND` | `kind` (of a job, schedule, workflow step, or compensation) has no handler in this deployment (v0.7). Distinct from the run-time failure code `UNKNOWN_JOB_KIND`. |
 | 400 | `INVALID_JSON` | Body is not exactly one valid JSON object with known fields. |
 | 400 | `VALIDATION_FAILED` | A field violates its rules. |
 | 400 | `INVALID_JOB_ID` | Path job ID is not a UUID. |

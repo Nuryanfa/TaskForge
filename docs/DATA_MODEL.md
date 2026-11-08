@@ -1,9 +1,9 @@
-# TaskForge data model (schema v6)
+# TaskForge data model (schema v7)
 
 PostgreSQL is the only durable store. The schema is defined by the embedded
 migrations in [`db/migrations`](../db/migrations) and applied by
 `taskforge-migrate` using goose. This document describes the schema after
-migration `000006`.
+migration `000007`.
 
 ## Entity relationships
 
@@ -97,6 +97,12 @@ erDiagram
 | `workflow_id` | `UUID` | nullable, FK → `workflows.id` | Owning workflow. |
 | `workflow_step_id` | `BIGINT` | nullable, FK → `workflow_steps.id` | Owning step. |
 | `workflow_role` | `TEXT` | `action` or `compensation` | Which job of the step this is. |
+
+Trace columns (v0.7): `trace_parent` (`TEXT`, NULL or a W3C traceparent) is
+the span context that caused the job; `trace_link` (`BOOLEAN`, default false)
+is decided at insertion and is true only for client-delayed jobs, whose
+attempts start linked root spans instead of child spans. Neither is returned
+by the API. `workflows.trace_parent` stores the `workflow.submit` context.
 
 ### Invariants
 
@@ -252,6 +258,7 @@ rows with `published_at IS NULL` are never deleted.
 | 4 | `000004_add_schedules.sql` | v0.4 | `schedules` table, `jobs.schedule_id` and `scheduled_for`, per-slot unique index, due/list indexes. |
 | 5 | `000005_add_outbox.sql` | v0.5 | `outbox_events` table, job event trigger function and triggers, unpublished/published indexes. Existing jobs are not backfilled. |
 | 6 | `000006_add_workflows.sql` | v0.6 | `workflows`, `workflow_steps`, job workflow link columns and indexes; job event snapshot gains `workflow_id`. Existing jobs stay standalone. |
+| 7 | `000007_add_trace_context.sql` | v0.7 | `jobs.trace_parent`, `jobs.trace_link`, `workflows.trace_parent` (W3C traceparent, checked format; ADR 0013). Existing rows keep NULL / false. |
 
 ### Migration rules
 

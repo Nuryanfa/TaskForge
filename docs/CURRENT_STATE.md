@@ -3,11 +3,12 @@
 ## Product
 
 TaskForge is an educational, production-like durable job platform written in
-Go. v0.6 adds workflow DAGs with saga compensation on top of the v0.5
+Go. v0.7 adds connected tracing, bounded metrics, SLOs with tested burn-rate
+alerts, and dashboards on top of v0.6 workflow DAGs with saga compensation and the v0.5
 transactional outbox and NATS JetStream events, while PostgreSQL remains the
 durable coordination authority.
 
-## Current implemented state (v0.6)
+## Current implemented state (v0.7)
 
 - Commands: `taskforge-api`, `taskforge-worker`, `taskforge-migrate`, and
   `taskforge-relay`.
@@ -64,6 +65,19 @@ durable coordination authority.
 - CI runs unit, PostgreSQL and NATS integration, race, build, Compose, and
   image validation.
 
+- Every job and workflow stores the trace context that caused it (migration
+  7); worker attempts continue the trace as children, or as linked roots for
+  client-delayed jobs, and workflow steps chain causally (ADR 0013). Client
+  `traceparent` headers are links only.
+- Prometheus metrics with bounded labels on a separate loopback listener per
+  process; database gauges are cached snapshots; job outcomes are reported
+  only after commit.
+- Start-latency (99 % within 5 s of readiness) and reliability (99.5 %, platform
+  failures only) SLOs with multi-window burn-rate, stalled-worker, and
+  missing-signal alerts, all `promtool`-tested; a provisioned Grafana
+  dashboard; Jaeger; `taskforge-loadgen` and a burn demo.
+- The API rejects unregistered kinds with `400 UNSUPPORTED_JOB_KIND`.
+
 ## Architecture decisions
 
 - Go module: `github.com/Nuryanfa/TaskForge`.
@@ -92,12 +106,14 @@ Not yet implemented:
   branches, or resuming a workflow after redrive; events for schedule changes
 - Arbitrary commands, binaries, scripts, URLs, or user-provided executable code
 - Authentication, public-network exposure, multi-tenancy, or billing
-- gRPC, Prometheus, OpenTelemetry, Kubernetes, or a web dashboard
+- Trace propagation through NATS events, the API-availability SLO,
+  Alertmanager routing, log shipping
+- gRPC, Kubernetes, or a web UI beyond Grafana
 - Claims of exactly-once execution or production readiness
 
 ## Further reading
 
 [System design](DESIGN.md) · [Data model](DATA_MODEL.md) · [API](API.md) ·
-[Events](EVENTS.md) · [Workflows](WORKFLOWS.md) ·
+[Events](EVENTS.md) · [Workflows](WORKFLOWS.md) · [Observability](OBSERVABILITY.md) · [SLOs](SLO.md) ·
 [Configuration](CONFIGURATION.md) · [Operations](OPERATIONS.md) ·
 [Testing](TESTING.md) · [ADRs](adr/README.md)

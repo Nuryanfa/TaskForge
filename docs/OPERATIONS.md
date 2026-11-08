@@ -77,6 +77,9 @@ results, keys, and DSNs are never logged.
 | `worker_heartbeat_failed` | error | W | Lease renewal failed for a reason other than lost ownership; execution was cancelled. |
 | `worker_persist_outcome_failed` | error | W | Could not write success/failure; job will be recovered after lease expiry. |
 | `worker_recovery_failed` | error | W | Recovery transaction failed as a whole (usually database availability). |
+| `metrics_started` / `metrics_listen_failed` / `metrics_server_failed` | info / error | A W R | Metrics listener lifecycle; a listen failure stops startup. |
+| `metrics_snapshot_failed` | error | A | The database snapshot for gauges failed; the gauges disappear until the next success. |
+| `otel_export_failed` | warn | A W R | Span export failed (logged at most once a minute; counted in `taskforge_otel_export_failures_total`). |
 | `worker_recovery_partial` | error | W | Some jobs in a recovery batch were rolled back; `failed_job_ids` lists them and the rest of the batch was recovered. |
 | `worker_jobs_recovered` | info | W | `count` expired leases were requeued or dead-lettered. Frequent occurrences mean crashes or a lease that is too short. |
 | `worker_schedule_dispatch_failed` | error | W | Recurring schedule dispatch transaction failed. |
@@ -100,6 +103,20 @@ Codes stored in `jobs.last_error_code`, `job_attempts.error_code`, and
 | `DEMO_FAILURE` | no | `demo.fail` | Deliberate permanent failure (or the payload's custom `code`). |
 | `DEMO_TRANSIENT` | yes | `demo.flaky` | Deliberate retryable failure for the first `fail_attempts` attempts. |
 | `V01_MIGRATION_RECOVERY` | — | migration 2 | Attempt closed while upgrading from v0.1. |
+
+## Alerts
+
+Dashboards: Grafana http://127.0.0.1:3000 ("TaskForge — what is broken?"),
+Prometheus http://127.0.0.1:9090/alerts, Jaeger http://127.0.0.1:16686.
+Definitions: [SLO.md](SLO.md).
+
+| Alert | First checks |
+| --- | --- |
+| `TaskForgeStartLatencyFastBurn` / `SlowBurn` | Dashboard "Is work piling up?": ready jobs and oldest ready age. Are workers running and at full concurrency? Are handlers slow (attempt duration p95)? Add workers or concurrency; in Jaeger, open slow traces and compare the gap between `job.enqueue` and `job.attempt`. |
+| `TaskForgeReliabilityFastBurn` / `SlowBurn` | Outcomes by class: which platform code? `LEASE_EXPIRED` means workers crash, are killed, or lose the database (check `worker_jobs_recovered`, restarts, lease vs. heartbeat); `UNKNOWN_JOB_KIND` means workers run an older build than the API. |
+| `TaskForgeJobsNotStarting` | No worker is claiming: check worker processes and logs (`worker_claim_failed`), database connectivity, and whether ready jobs are in a queue no worker serves. |
+| `TaskForgeDBCollectorAbsent` | The API process or its database connection is down (`metrics_snapshot_failed` in API logs); `/readyz` will also fail. |
+| `TaskForgeTargetDown` | The named process is down or its metrics listener is unreachable; `metrics_listen_failed` at startup means the address is in use. |
 
 ## Runbooks
 
@@ -218,7 +235,7 @@ WHERE s.workflow_id = $1 ORDER BY s.position;
   `pg_dump` or base backups with WAL archiving) cover TaskForge entirely.
 - Published `outbox_events` rows are purged after `TASKFORGE_OUTBOX_RETENTION`;
   JetStream keeps messages for `TASKFORGE_NATS_STREAM_MAX_AGE`.
-- v0.6 has no other automatic retention. `jobs`, `job_attempts`,
+- v0.7 has no other automatic retention. `jobs`, `job_attempts`,
   `dead_letters`, `workflows`, and `workflow_steps` grow without bound. Archive
   or delete terminal rows manually only when no dead-letter row or workflow
   step references them.
