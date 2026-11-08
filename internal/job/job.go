@@ -51,6 +51,9 @@ type Job struct {
 	DeadLetteredAt *time.Time
 	ScheduleID     *string
 	ScheduledFor   *time.Time
+	WorkflowID     *string
+	WorkflowStepID *int64
+	WorkflowRole   *string
 }
 
 // Execution identifies one ownership epoch. Its values must accompany every

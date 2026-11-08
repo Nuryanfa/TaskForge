@@ -170,6 +170,47 @@ func TestV04SchemaUpgradeIntegration(t *testing.T) {
 	}
 }
 
+func TestV05SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	v5 := int64(5)
+	if err := run(ctx, databaseURL, &v5); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	id := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	var workflowID *string
+	if err := conn.QueryRow(ctx, `SELECT workflow_id FROM jobs WHERE id=$1`, id).Scan(&workflowID); err != nil || workflowID != nil {
+		t.Fatalf("existing job workflow_id=%v err=%v", workflowID, err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE jobs SET workflow_role='action' WHERE id=$1`, id); err == nil {
+		t.Fatal("half-linked workflow job was accepted")
+	}
+	newID := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, newID, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	var hasKey bool
+	if err := conn.QueryRow(ctx, `SELECT payload ? 'workflow_id' FROM outbox_events WHERE job_id=$1`, newID).Scan(&hasKey); err != nil || !hasKey {
+		t.Fatalf("outbox payload has workflow_id=%v err=%v", hasKey, err)
+	}
+}
+
 func migrationTestURL(t *testing.T, baseURL string) string {
 	t.Helper()
 	schema := "taskforge_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
