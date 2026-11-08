@@ -109,3 +109,43 @@ func TestRecoveryIsolatesAFailingWorkflowJobIntegration(t *testing.T) {
 		t.Fatalf("poisoned job status=%s err=%v, want left running for an operator", poisoned.Status, err)
 	}
 }
+
+// TestAbortSurvivorIsCanceledOnNextEnginePassIntegration: a queued sibling
+// that was row-locked elsewhere when the workflow aborted survives the abort
+// (SKIP LOCKED). The next engine pass of that workflow must cancel it rather
+// than let a compensating workflow start new actions.
+func TestAbortSurvivorIsCanceledOnNextEnginePassIntegration(t *testing.T) {
+	store := workflowStore(t, 1)
+	ctx := context.Background()
+	failing, slow, survivor := step("a", "demo.fail"), withCompensation(step("c", "demo.echo"), "demo.echo"), step("b", "demo.echo")
+	failing.Priority, slow.Priority, survivor.Priority = 10, 8, 5
+	wf := submitWorkflow(t, store, failing, survivor, slow)
+	claimedA, claimedC := claimNext(t, store, "w1"), claimNext(t, store, "w2")
+	if stepName(t, store, claimedA) != "a" || stepName(t, store, claimedC) != "c" {
+		t.Fatal("unexpected claim order")
+	}
+	survivorJob := *stepByName(t, getWorkflow(t, store, wf.ID), "b").JobID
+	holder, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT id FROM jobs WHERE id=$1 FOR UPDATE`, survivorJob); err != nil {
+		t.Fatal(err)
+	}
+	applyOutcome(t, store, claimedA, failPermanent("DEMO_FAILURE"))
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b := stepByName(t, getWorkflow(t, store, wf.ID), "b"); b.Status != job.StepDispatched {
+		t.Fatalf("precondition: survivor should still be dispatched, got %s", b.Status)
+	}
+	applyOutcome(t, store, claimedC, succeed)
+	if b := stepByName(t, getWorkflow(t, store, wf.ID), "b"); b.Status != job.StepCanceled {
+		t.Fatalf("survivor after next engine pass=%s, want canceled", b.Status)
+	}
+	final := drainWorkflow(t, store, wf.ID, succeed)
+	if final.Status != job.WorkflowCompensated {
+		t.Fatalf("final=%s", final.Status)
+	}
+	assertWorkflowInvariants(t, store, wf.ID)
+}

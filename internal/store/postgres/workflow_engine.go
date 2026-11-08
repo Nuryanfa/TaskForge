@@ -207,6 +207,14 @@ func abortWorkflow(ctx context.Context, tx pgx.Tx, workflowID string, reason job
 	if _, err := tx.Exec(ctx, `UPDATE workflow_steps SET status='skipped' WHERE workflow_id=$1 AND status='pending'`, workflowID); err != nil {
 		return classify("skip pending steps", err)
 	}
+	return cancelQueuedActions(ctx, tx, workflowID)
+}
+
+// cancelQueuedActions cancels the workflow's still-queued action jobs. It
+// uses SKIP LOCKED because callers hold the workflow row; a job locked by a
+// concurrent claim is left alone and reaches the engine on its own, and one
+// locked for any other reason is swept by a later engine pass.
+func cancelQueuedActions(ctx context.Context, tx pgx.Tx, workflowID string) error {
 	rows, err := tx.Query(ctx, `SELECT id FROM jobs WHERE workflow_id=$1 AND workflow_role='action'
 		AND status='queued' ORDER BY id FOR UPDATE SKIP LOCKED`, workflowID)
 	if err != nil {
@@ -248,6 +256,11 @@ func settleWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) error {
 	}
 	if wf.status.Terminal() {
 		return nil
+	}
+	if wf.status == job.WorkflowCompensating {
+		if err := cancelQueuedActions(ctx, tx, workflowID); err != nil {
+			return err
+		}
 	}
 	steps, err := loadSteps(ctx, tx, workflowID)
 	if err != nil {
