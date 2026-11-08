@@ -332,27 +332,44 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		return 0, classify("read expired leases", err)
 	}
 	rows.Close()
-	var terminal []terminalJob
+	// Lock every involved workflow first, in ascending id order, so that
+	// concurrent recovery batches cannot deadlock on workflow rows.
+	if err := lockWorkflowsInOrder(queryCtx, tx, selected); err != nil {
+		return 0, err
+	}
+	// Each job is recovered under its own savepoint: a job whose workflow
+	// cannot advance is rolled back alone and reported, instead of blocking
+	// lease recovery for every other job forever.
+	recovered := 0
+	var failures []error
 	for _, item := range selected {
 		exec := job.Execution{JobID: item.ID, Attempt: item.AttemptCount, WorkerID: *item.LeaseOwner,
 			FencingToken: item.FencingToken, ExecutionKey: item.ExecutionKey}
-		finished, err := s.finalizeFailure(queryCtx, tx, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
+		savepoint, err := tx.Begin(queryCtx)
 		if err != nil {
-			return 0, err
+			return 0, classify("begin recovery savepoint", err)
 		}
-		if finished != nil {
-			terminal = append(terminal, *finished)
+		finished, err := s.finalizeFailure(queryCtx, savepoint, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
+		if err == nil && finished != nil {
+			err = s.advanceWorkflows(queryCtx, savepoint, []terminalJob{*finished})
 		}
-	}
-	// One engine pass for the whole batch: workflow rows are locked in
-	// ascending id order to keep concurrent recovery batches deadlock-free.
-	if err := s.advanceWorkflows(queryCtx, tx, terminal); err != nil {
-		return 0, err
+		if err != nil {
+			_ = savepoint.Rollback(queryCtx)
+			if errors.Is(err, ErrUnavailable) || queryCtx.Err() != nil {
+				return 0, err
+			}
+			failures = append(failures, fmt.Errorf("recover job %s: %w", item.ID, err))
+			continue
+		}
+		if err := savepoint.Commit(queryCtx); err != nil {
+			return 0, classify("release recovery savepoint", err)
+		}
+		recovered++
 	}
 	if err := tx.Commit(queryCtx); err != nil {
 		return 0, classify("commit lease recovery", err)
 	}
-	return len(selected), nil
+	return recovered, errors.Join(failures...)
 }
 
 func scanJob(row rowScanner) (job.Job, error) {

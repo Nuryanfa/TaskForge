@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
 )
@@ -66,5 +68,44 @@ func TestInvariantCheckerDetectsBypassedEngineIntegration(t *testing.T) {
 	violations := workflowInvariantViolations(t, store, wf.ID)
 	if !hasViolation(violations, "I8") || !hasViolation(violations, "I9") {
 		t.Fatalf("bypass not detected; violations=%v", violations)
+	}
+}
+
+// TestRecoveryIsolatesAFailingWorkflowJobIntegration corrupts one workflow so
+// that its engine pass fails. Lease recovery must still recover every other
+// expired job in the batch instead of rolling all of them back forever.
+func TestRecoveryIsolatesAFailingWorkflowJobIntegration(t *testing.T) {
+	store := workflowStore(t, 1)
+	ctx := context.Background()
+	wf := submitWorkflow(t, store, step("a", "demo.echo"))
+	standalone, _, err := store.CreateJob(ctx, submission(t, 0, nil, `{"message":"bystander"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, worker := range []string{"doomed-1", "doomed-2"} {
+		if _, err := store.ClaimNextJob(ctx, worker, time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE workflow_steps SET status='succeeded', compensation_status='not_defined' WHERE workflow_id=$1`, wf.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	for range 2 {
+		recovered, err := store.RecoverExpiredJobs(ctx, 10)
+		if !errors.Is(err, ErrStateConflict) {
+			t.Fatalf("recovery err=%v, want the poisoned job's state conflict reported", err)
+		}
+		if recovered > 1 {
+			t.Fatalf("recovered=%d", recovered)
+		}
+	}
+	bystander, err := store.GetJob(ctx, standalone.ID)
+	if err != nil || bystander.Status != job.StatusFailed || bystander.LastErrorCode == nil || *bystander.LastErrorCode != "LEASE_EXPIRED" {
+		t.Fatalf("bystander=%+v err=%v", bystander.Status, err)
+	}
+	poisoned, err := store.GetJob(ctx, *getWorkflow(t, store, wf.ID).Steps[0].JobID)
+	if err != nil || poisoned.Status != job.StatusRunning {
+		t.Fatalf("poisoned job status=%s err=%v, want left running for an operator", poisoned.Status, err)
 	}
 }

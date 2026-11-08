@@ -64,11 +64,8 @@ func (s *Store) advanceWorkflows(ctx context.Context, tx pgx.Tx, terminal []term
 	if len(owned) == 0 {
 		return nil
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		if _, err := lockWorkflow(ctx, tx, id); err != nil {
-			return err
-		}
+	if err := lockWorkflowIDs(ctx, tx, ids); err != nil {
+		return err
 	}
 	for _, item := range owned {
 		if err := s.onJobTerminal(ctx, tx, item); err != nil {
@@ -76,6 +73,32 @@ func (s *Store) advanceWorkflows(ctx context.Context, tx pgx.Tx, terminal []term
 		}
 	}
 	return nil
+}
+
+// lockWorkflowIDs locks workflow rows in ascending id order, the global
+// order that keeps multi-workflow transactions deadlock-free.
+func lockWorkflowIDs(ctx context.Context, tx pgx.Tx, ids []string) error {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	for _, id := range sorted {
+		if _, err := lockWorkflow(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lockWorkflowsInOrder locks the distinct workflows that own any of jobs.
+func lockWorkflowsInOrder(ctx context.Context, tx pgx.Tx, jobs []job.Job) error {
+	seen := map[string]bool{}
+	var ids []string
+	for _, item := range jobs {
+		if item.WorkflowID != nil && !seen[*item.WorkflowID] {
+			seen[*item.WorkflowID] = true
+			ids = append(ids, *item.WorkflowID)
+		}
+	}
+	return lockWorkflowIDs(ctx, tx, ids)
 }
 
 func (s *Store) onJobTerminal(ctx context.Context, tx pgx.Tx, item terminalJob) error {
