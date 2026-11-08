@@ -233,7 +233,18 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 	if command.RowsAffected() != 1 {
 		return nil, ErrStateConflict
 	}
-	if failure.Retryable && current.AttemptCount < current.MaxAttempts {
+	retry := failure.Retryable && current.AttemptCount < current.MaxAttempts
+	if retry && current.WorkflowID != nil && current.WorkflowRole != nil && *current.WorkflowRole == job.RoleAction {
+		// A workflow that is no longer running starts no new actions, and a
+		// retry would be one: the failure of an in-flight step is final.
+		// Compensations keep retrying because the saga still needs them.
+		wf, err := lockWorkflow(ctx, tx, *current.WorkflowID)
+		if err != nil {
+			return nil, err
+		}
+		retry = wf.status == job.WorkflowRunning
+	}
+	if retry {
 		delay := job.RetryDelay(current.ID, current.AttemptCount, current.InitialBackoff, current.MaxBackoff, current.JitterPercent)
 		command, err = tx.Exec(ctx, `UPDATE jobs SET status='queued', available_at=NOW()+($4*INTERVAL '1 microsecond'),
 			last_error_code=$5, updated_at=NOW(), completed_at=NULL, lease_owner=NULL, lease_expires_at=NULL

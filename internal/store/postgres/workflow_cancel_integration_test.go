@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
 	"github.com/google/uuid"
@@ -147,4 +148,26 @@ func TestClaimLoadsWorkflowContextIntegration(t *testing.T) {
 	if standalone.Job.WorkflowID != nil || standalone.Execution.Workflow != nil {
 		t.Fatalf("standalone context=%+v", standalone.Execution.Workflow)
 	}
+}
+
+// TestAbortedWorkflowDoesNotRetryItsRunningStepIntegration: a step running
+// when its workflow is canceled fails retryably. It must not be re-queued and
+// executed again; the failure is final because the workflow has stopped.
+func TestAbortedWorkflowDoesNotRetryItsRunningStepIntegration(t *testing.T) {
+	store := workflowStore(t, 3)
+	ctx := context.Background()
+	wf := submitWorkflow(t, store, withCompensation(step("a", "demo.flaky"), "demo.echo"))
+	running := claimNext(t, store, "w")
+	if _, err := store.CancelWorkflow(ctx, wf.ID); err != nil {
+		t.Fatal(err)
+	}
+	applyOutcome(t, store, running, failRetryable("DEMO_TRANSIENT"))
+	final := getWorkflow(t, store, wf.ID)
+	if final.Status != job.WorkflowCanceled || stepByName(t, final, "a").Status != job.StepFailed {
+		t.Fatalf("final=%s step=%s", final.Status, stepByName(t, final, "a").Status)
+	}
+	if _, err := store.ClaimNextJob(ctx, "w", time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("aborted workflow's step was re-queued: %v", err)
+	}
+	assertWorkflowInvariants(t, store, wf.ID)
 }
