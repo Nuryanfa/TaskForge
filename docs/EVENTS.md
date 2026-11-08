@@ -75,6 +75,7 @@ Body:
     "error_code": null,
     "available_at": "2026-11-07T13:59:56.701213+00:00",
     "schedule_id": null,
+    "workflow_id": null,
     "dead_lettered": false
   }
 }
@@ -89,6 +90,12 @@ Body:
 | `job.error_code` | Last failure code, e.g. `LEASE_EXPIRED` for a recovered crash. |
 | `job.available_at` | When the job is or was next claimable. |
 | `job.dead_lettered` | `true` on `job.failed` events. |
+| `job.workflow_id` | Workflow that owns the job (action or compensation), or `null`. Added in v0.6; additive, so `version` stays `1`. |
+
+Workflow-level transitions (`compensating`, `compensated`, …) are not
+published in v0.6. Consumers can follow a workflow through the job events of
+its steps, or read `GET /v1/workflows/{id}`. Jobs canceled by a workflow abort
+emit ordinary `job.canceled` events.
 
 ## Consuming
 

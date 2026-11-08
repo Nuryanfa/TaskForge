@@ -1,4 +1,4 @@
-# TaskForge system design (v0.5)
+# TaskForge system design (v0.6)
 
 This document describes how TaskForge is built: its components, package
 structure, concurrency model, the transactional protocols behind every job
@@ -21,9 +21,11 @@ Goals:
   timeouts, retries, and page sizes.
 - No leakage of payloads, results, idempotency keys, or credentials through the
   public API or logs.
+- Workflow DAGs with saga compensation whose state is exactly as consistent as
+  job state.
 
-Non-goals for v0.5: exactly-once execution or delivery, dispatching jobs
-through the broker, workflows,
+Non-goals for v0.6: exactly-once execution or delivery, dispatching jobs
+through the broker, data flow or conditional branches between workflow steps,
 authentication, multi-tenancy, metrics/tracing, and execution of arbitrary user
 code.
 
@@ -344,6 +346,53 @@ handler does a non-blocking send on a buffered channel. Executors select on
 the poll timer **or** that channel, then call `ClaimNextJob` as usual. Lost,
 late, or duplicate hints only change latency, never correctness.
 
+### 5.9 Workflow engine
+
+Full concepts are in [WORKFLOWS.md](WORKFLOWS.md) and the decision in
+[ADR 0012](adr/0012-workflow-dags-and-saga-compensation.md). The engine lives
+in `internal/store/postgres/workflow_engine.go`; the pure decisions it relies
+on (`ReadyCompensations`, `Settle`) live in `internal/job/workflow_decide.go`.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant D as PostgreSQL (one transaction)
+    W->>D: UPDATE jobs → succeeded/failed (fenced)  [holds job row]
+    D->>D: lock workflows row(s) in ascending id
+    D->>D: record step outcome (WHERE status='dispatched')
+    alt step succeeded and workflow running
+        D->>D: decrement remaining_dependencies of dependents
+        D->>D: dispatch dependents that reached 0
+    else step failed and workflow running
+        D->>D: abort: skip pending, cancel queued (SKIP LOCKED)
+    end
+    D->>D: settle: sweep queued actions if compensating,<br/>dispatch ready compensations, set terminal status
+    W->>D: COMMIT
+```
+
+Entry points are `finishJob` (completion) and the terminal branch of
+`finalizeFailure` (used by `FailJob` and lease recovery). `CancelWorkflow`
+locks the workflow's queued jobs, then the workflow row, then aborts.
+`CancelQueuedJob` rejects workflow-owned jobs, and redrive inserts a
+standalone job, so no other path can make a workflow job terminal.
+
+Key mechanics:
+
+- **Lock order:** job rows → `workflows` rows ascending → `workflow_steps`.
+  A transaction that touches several workflows (a recovery batch) locks all of
+  them first. Waiting on a job row while holding a workflow row is avoided by
+  using `SKIP LOCKED` for engine-side cancellation.
+- **Recovery isolation:** each expired job is recovered under its own
+  savepoint, so a job whose workflow cannot advance is reported and skipped
+  instead of blocking recovery for every queue.
+- **Exactly-once dispatch:** fan-in counter under the workflow row lock, step
+  status guards, and the unique `(workflow_step_id, workflow_role)` index.
+- **Timestamps:** dispatched jobs use `clock_timestamp()` for `created_at`;
+  `NOW()` would be the start of a transaction that may have waited on the
+  workflow lock while a dependency completed.
+- **Consistent reads:** `GetWorkflow` reads the workflow and its steps in one
+  read-only REPEATABLE READ transaction.
+
 ## 6. Worker concurrency model
 
 ```mermaid
@@ -400,8 +449,15 @@ type Handler interface {
   idempotency key for external side effects, or pass `exec.FencingToken` to a
   downstream that enforces monotonic tokens.
 
-The registry is a fixed, compile-time map. v0.5 ships only `demo.echo`, which
-expects `{"message": "<non-empty string>"}` and returns it unchanged. Unknown
+For workflow jobs `exec.Workflow` is set. A compensation receives
+`CompensatesExecutionKey`, the execution key of the action it undoes, and
+should use it to reverse exactly that downstream effect (see
+[WORKFLOWS.md](WORKFLOWS.md#writing-an-idempotent-compensation)).
+
+The registry is a fixed, compile-time map with four safe demo handlers:
+`demo.echo` (expects `{"message": "<non-empty string>"}` and echoes it),
+`demo.fail` (always fails permanently), `demo.flaky` (fails retryably for the
+first N attempts), and `demo.sleep` (sleeps, honoring cancellation). Unknown
 kinds fail permanently with `UNKNOWN_JOB_KIND`.
 
 ## 8. Failure-mode analysis
@@ -422,6 +478,11 @@ kinds fail permanently with `UNKNOWN_JOB_KIND`.
 | NATS unavailable | Relay publishes nothing and retries; backlog accumulates in `outbox_events`; workers fall back to polling. | No job processing impact; events delayed, not lost. |
 | Two relays running | Advisory lock lets one publish; the other stands by and takes over automatically. | Per-job order preserved. |
 | Handler returns invalid or oversized JSON | `CompleteJob` returns `ErrInvalidResult`; runner fails the job with permanent `INVALID_JOB_RESULT`. | Dead-lettered immediately instead of after lease expiry. |
+| Parallel workflow steps finish at the same instant | Workflow row lock serializes the fan-in counter; unique index backstops dispatch. | Dependent dispatched exactly once. |
+| Two recovery batches hold jobs of the same workflows in opposite order | Workflow rows locked in ascending id order before any job is recovered. | No deadlock (proven by a test that fails with `40P01` without the ordering). |
+| A workflow step job cannot be advanced (bug or manual edit) | Its recovery savepoint rolls back; the error is reported; other jobs commit. | Lease recovery never stalls globally. |
+| Worker crashes mid-compensation | Lease expiry requeues the compensation; it reruns with the same `CompensatesExecutionKey`; the dead worker is fenced out. | Saga completes; compensation at least once. |
+| Workflow canceled while a step is running | Pending steps skipped, queued ones canceled; the running step finishes and is compensated if it succeeded. | Workflow ends `canceled` with every succeeded step compensated. |
 
 ## 9. Security and privacy design
 
@@ -445,6 +506,11 @@ kinds fail permanently with `UNKNOWN_JOB_KIND`.
 - No retention or archival for `jobs`, `job_attempts`, or `dead_letters`.
 - Relay publishing is synchronous (one broker round trip per event); async
   batching would raise throughput at the cost of a more complex ordering rule.
-- Events are not published for schedule changes, only for job transitions.
+- Events are not published for schedule changes or workflow-level
+  transitions, only for job transitions.
+- Workflows have no data flow between steps, no conditional branches, and no
+  way to resume after a redrive; succeeded workflows report
+  `compensation_status = waiting` for steps whose compensation was never
+  needed.
 - The relay polls the outbox; `LISTEN/NOTIFY` could lower event latency.
 - `/healthz` container healthcheck targets the fixed address `127.0.0.1:8080`.

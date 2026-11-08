@@ -33,7 +33,13 @@ v0.4 provides delayed job submission (`run_at` / `delay_seconds`) and durable
 recurring cron schedules.
 v0.5 provides a trigger-written transactional outbox, an ordered NATS
 JetStream relay, and optional worker wake-ups. NATS must never decide job
-ownership. Contributions must not add workflow DAGs, Kubernetes, or a web UI.
+ownership.
+v0.6 provides workflow DAGs with saga compensation. The workflow engine runs
+inside the transaction that makes a job terminal and must follow the lock
+order in ADR 0012 (job rows, then workflow rows in ascending id, then steps).
+Any new code path that moves a workflow job to a terminal status must call the
+engine, and workflow changes need tests that end with
+`assertWorkflowInvariants`. Contributions must not add Kubernetes or a web UI.
 
 ## Validation
 

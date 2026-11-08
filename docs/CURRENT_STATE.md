@@ -3,11 +3,11 @@
 ## Product
 
 TaskForge is an educational, production-like durable job platform written in
-Go. v0.5 adds a transactional outbox and NATS JetStream lifecycle events, plus
-optional NATS wake-ups for workers, while PostgreSQL remains the durable
-coordination authority.
+Go. v0.6 adds workflow DAGs with saga compensation on top of the v0.5
+transactional outbox and NATS JetStream events, while PostgreSQL remains the
+durable coordination authority.
 
-## Current implemented state (v0.5)
+## Current implemented state (v0.6)
 
 - Commands: `taskforge-api`, `taskforge-worker`, `taskforge-migrate`, and
   `taskforge-relay`.
@@ -49,6 +49,18 @@ coordination authority.
   only from database timestamps; polling remains the correctness fallback.
 - Compose orders PostgreSQL and NATS health, migration completion, then API,
   worker, and relay startup.
+- Workflows (`POST /v1/workflows`) are DAGs of ordinary jobs with optional
+  compensations. Creation, step dispatch, abort, and compensation happen in
+  the same transaction as the job outcome that causes them; workflow rows are
+  locked in ascending id order and lease recovery isolates each job under a
+  savepoint.
+- Fan-in steps are dispatched exactly once; failed or canceled workflows skip
+  pending steps, cancel queued ones, let running ones finish, and compensate
+  succeeded steps in reverse dependency order. A dead-lettered compensation
+  ends the workflow as `compensation_failed`.
+- Compensation handlers receive the execution key of the action they undo.
+- Workflow correctness is checked by nine database invariants after scenario,
+  race, crash-injection, and seeded randomized soak tests.
 - CI runs unit, PostgreSQL and NATS integration, race, build, Compose, and
   image validation.
 
@@ -70,11 +82,14 @@ coordination authority.
   effects remain possible under at-least-once execution.
 - Retry policy is global per API process; no per-queue, per-kind, or
   client-supplied policy, and no bulk redrive.
-- No retention or archival of jobs, attempts, or dead letters.
+- No retention or archival of jobs, attempts, dead letters, or workflows.
+- Workflow steps and compensations are at least once; compensations must be
+  idempotent.
 
 Not yet implemented:
 
-- Workflow DAGs or saga compensation; events for schedule changes
+- Workflow-level events, data flow between workflow steps, conditional
+  branches, or resuming a workflow after redrive; events for schedule changes
 - Arbitrary commands, binaries, scripts, URLs, or user-provided executable code
 - Authentication, public-network exposure, multi-tenancy, or billing
 - gRPC, Prometheus, OpenTelemetry, Kubernetes, or a web dashboard
@@ -83,6 +98,6 @@ Not yet implemented:
 ## Further reading
 
 [System design](DESIGN.md) · [Data model](DATA_MODEL.md) · [API](API.md) ·
-[Events](EVENTS.md) ·
+[Events](EVENTS.md) · [Workflows](WORKFLOWS.md) ·
 [Configuration](CONFIGURATION.md) · [Operations](OPERATIONS.md) ·
 [Testing](TESTING.md) · [ADRs](adr/README.md)
