@@ -211,11 +211,15 @@ func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy w
 	}
 	hash := sha256.Sum256(payload)
 	jobID := uuid.NewString()
+	// created_at uses clock_timestamp(), not NOW(): NOW() is the start of this
+	// transaction, which may predate the dependency completion this dispatch
+	// waited for on the workflow row lock.
 	if _, err := tx.Exec(ctx, `INSERT INTO jobs
 		(id, queue, kind, payload, payload_hash, status, priority, available_at,
 		execution_idempotency_key, max_attempts, retry_initial_backoff_ms, retry_max_backoff_ms,
-		retry_jitter_percent, workflow_id, workflow_step_id, workflow_role)
-		VALUES ($1, $2, $3, $4, $5, 'queued', $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14)`,
+		retry_jitter_percent, workflow_id, workflow_step_id, workflow_role, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'queued', $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14,
+		clock_timestamp(), clock_timestamp())`,
 		jobID, queue, kind, payload, hash[:], priority, uuid.NewString(), policy.maxAttempts,
 		policy.initialBackoffMS, policy.maxBackoffMS, policy.jitterPercent, workflowID, item.id, role); err != nil {
 		var pgError *pgconn.PgError

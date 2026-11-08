@@ -188,3 +188,39 @@ func TestGetWorkflowReturnsAConsistentSnapshotIntegration(t *testing.T) {
 		}
 	}
 }
+
+// TestDispatchedJobIsCreatedAfterItsDependenciesIntegration forces the
+// interleaving the soak test found: the transaction completing d2 starts first
+// but blocks, d1 completes meanwhile, and then d2's transaction dispatches the
+// dependent. The dependent's created_at must not precede d1's completion even
+// though NOW() in d2's transaction is older.
+func TestDispatchedJobIsCreatedAfterItsDependenciesIntegration(t *testing.T) {
+	store := workflowStore(t, 1)
+	ctx := context.Background()
+	wf := submitWorkflow(t, store, step("d1", "demo.echo"), step("d2", "demo.echo"), step("s", "demo.echo", "d1", "d2"))
+	first, second := claimNext(t, store, "w1"), claimNext(t, store, "w2")
+	d1, d2 := first, second
+	if stepName(t, store, first) == "d2" {
+		d1, d2 = second, first
+	}
+	holder, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT id FROM jobs WHERE id=$1 FOR UPDATE`, d2.Job.ID); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan error, 1)
+	go func() { blocked <- store.CompleteJob(ctx, d2.Execution, []byte(`{"ok":true}`)) }()
+	time.Sleep(200 * time.Millisecond) // d2's transaction has started and is waiting
+	applyOutcome(t, store, d1, succeed)
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-blocked; err != nil {
+		t.Fatal(err)
+	}
+	if violations := workflowInvariantViolations(t, store, wf.ID); hasViolation(violations, "I2") {
+		t.Fatalf("dependent job timestamped before its dependency completed: %v", violations)
+	}
+}
