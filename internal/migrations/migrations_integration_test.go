@@ -211,6 +211,40 @@ func TestV05SchemaUpgradeIntegration(t *testing.T) {
 	}
 }
 
+func TestV06SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	v6 := int64(6)
+	if err := run(ctx, databaseURL, &v6); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	id := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	var traceParent *string
+	var traceLink bool
+	if err := conn.QueryRow(ctx, `SELECT trace_parent, trace_link FROM jobs WHERE id=$1`, id).Scan(&traceParent, &traceLink); err != nil || traceParent != nil || traceLink {
+		t.Fatalf("existing job trace_parent=%v trace_link=%v err=%v", traceParent, traceLink, err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE jobs SET trace_parent='bad' WHERE id=$1`, id); err == nil {
+		t.Fatal("malformed trace_parent was accepted")
+	}
+}
+
 func migrationTestURL(t *testing.T, baseURL string) string {
 	t.Helper()
 	schema := "taskforge_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "_")

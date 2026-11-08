@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
+	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -19,7 +20,7 @@ idempotency_key, available_at, attempt_count, result, last_error_code,
 created_at, updated_at, started_at, completed_at, lease_owner, lease_expires_at,
 fencing_token, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
 retry_max_backoff_ms, retry_jitter_percent, dead_lettered_at, schedule_id, scheduled_for,
-workflow_id, workflow_step_id, workflow_role`
+workflow_id, workflow_step_id, workflow_role, trace_parent, trace_link`
 
 var errorCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
@@ -32,10 +33,11 @@ func (s *Store) CreateJob(ctx context.Context, submission job.Submission) (job.J
 	query := `INSERT INTO jobs
 		(id, queue, kind, payload, payload_hash, status, priority, idempotency_key,
 		available_at, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
-		retry_max_backoff_ms, retry_jitter_percent)
+		retry_max_backoff_ms, retry_jitter_percent, trace_parent, trace_link)
 		VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7,
 		COALESCE($13::timestamptz, NOW() + (COALESCE($14::bigint, 0) * INTERVAL '1 second')),
-		$8, $9, $10, $11, $12)`
+		$8, $9, $10, $11, $12, $15,
+		COALESCE($13::timestamptz, NOW() + (COALESCE($14::bigint, 0) * INTERVAL '1 second')) > NOW())`
 	if submission.IdempotencyKey != nil {
 		query += ` ON CONFLICT (queue, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
 	}
@@ -48,7 +50,8 @@ func (s *Store) CreateJob(ctx context.Context, submission job.Submission) (job.J
 	created, err := scanJob(s.pool.QueryRow(queryCtx, query, id, submission.Queue, submission.Kind,
 		submission.Payload, submission.Fingerprint[:], submission.Priority, submission.IdempotencyKey,
 		uuid.NewString(), s.retryPolicy.maxAttempts, s.retryPolicy.initialBackoff.Milliseconds(),
-		s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, submission.RunAt, delaySeconds))
+		s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, submission.RunAt, delaySeconds,
+		tracectx.FromContext(ctx)))
 	if err == nil {
 		return created, true, nil
 	}
@@ -404,7 +407,8 @@ func scanJob(row rowScanner) (job.Job, error) {
 		&found.UpdatedAt, &found.StartedAt, &found.CompletedAt, &found.LeaseOwner,
 		&found.LeaseExpiresAt, &found.FencingToken, &found.ExecutionKey, &found.MaxAttempts,
 		&initialMS, &maxMS, &found.JitterPercent, &found.DeadLetteredAt, &found.ScheduleID, &found.ScheduledFor,
-		&found.WorkflowID, &found.WorkflowStepID, &found.WorkflowRole)
+		&found.WorkflowID, &found.WorkflowStepID, &found.WorkflowRole,
+		&found.TraceParent, &found.TraceLink)
 	found.InitialBackoff = time.Duration(initialMS) * time.Millisecond
 	found.MaxBackoff = time.Duration(maxMS) * time.Millisecond
 	return found, err

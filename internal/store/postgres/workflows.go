@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
+	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -126,11 +127,12 @@ func (s *Store) CreateWorkflow(ctx context.Context, submission job.WorkflowSubmi
 	id := uuid.NewString()
 	err = tx.QueryRow(queryCtx, `INSERT INTO workflows
 		(id, label, status, idempotency_key, fingerprint, step_count, max_attempts,
-		retry_initial_backoff_ms, retry_max_backoff_ms, retry_jitter_percent)
-		VALUES ($1, $2, 'running', $3, $4, $5, $6, $7, $8, $9)
+		retry_initial_backoff_ms, retry_max_backoff_ms, retry_jitter_percent, trace_parent)
+		VALUES ($1, $2, 'running', $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
 		id, submission.Label, submission.IdempotencyKey, submission.Fingerprint[:], len(submission.Steps),
-		policy.maxAttempts, policy.initialBackoffMS, policy.maxBackoffMS, policy.jitterPercent).Scan(&id)
+		policy.maxAttempts, policy.initialBackoffMS, policy.maxBackoffMS, policy.jitterPercent,
+		tracectx.FromContext(queryCtx)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) && submission.IdempotencyKey != nil {
 		_ = tx.Rollback(queryCtx)
 		return s.resolveIdempotentWorkflow(ctx, submission)
@@ -217,11 +219,13 @@ func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy w
 	if _, err := tx.Exec(ctx, `INSERT INTO jobs
 		(id, queue, kind, payload, payload_hash, status, priority, available_at,
 		execution_idempotency_key, max_attempts, retry_initial_backoff_ms, retry_max_backoff_ms,
-		retry_jitter_percent, workflow_id, workflow_step_id, workflow_role, created_at, updated_at)
+		retry_jitter_percent, workflow_id, workflow_step_id, workflow_role, created_at, updated_at,
+		trace_parent)
 		VALUES ($1, $2, $3, $4, $5, 'queued', $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14,
-		clock_timestamp(), clock_timestamp())`,
+		clock_timestamp(), clock_timestamp(), $15)`,
 		jobID, queue, kind, payload, hash[:], priority, uuid.NewString(), policy.maxAttempts,
-		policy.initialBackoffMS, policy.maxBackoffMS, policy.jitterPercent, workflowID, item.id, role); err != nil {
+		policy.initialBackoffMS, policy.maxBackoffMS, policy.jitterPercent, workflowID, item.id, role,
+		tracectx.FromContext(ctx)); err != nil {
 		var pgError *pgconn.PgError
 		if errors.As(err, &pgError) && pgError.Code == "23505" {
 			return fmt.Errorf("dispatch step %s %s: %w", item.name, role, ErrStateConflict)

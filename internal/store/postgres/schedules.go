@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
+	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -241,13 +242,14 @@ func (s *Store) DispatchDueSchedules(ctx context.Context, batchSize int) (int, e
 		err = tx.QueryRow(queryCtx, `INSERT INTO jobs
 			(id, queue, kind, payload, payload_hash, status, priority, available_at,
 			execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
-			retry_max_backoff_ms, retry_jitter_percent, schedule_id, scheduled_for)
-			VALUES ($1, $2, $3, $4, $5, 'queued', $6, NOW(), $7, $8, $9, $10, $11, $12, $13)
+			retry_max_backoff_ms, retry_jitter_percent, schedule_id, scheduled_for, trace_parent)
+			VALUES ($1, $2, $3, $4, $5, 'queued', $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14)
 			ON CONFLICT (schedule_id, scheduled_for) WHERE schedule_id IS NOT NULL DO NOTHING
 			RETURNING id`,
 			newJobID, item.Queue, item.Kind, item.Payload, item.PayloadHash, item.Priority,
 			uuid.NewString(), s.retryPolicy.maxAttempts, s.retryPolicy.initialBackoff.Milliseconds(),
-			s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, item.ID, slot).Scan(&createdID)
+			s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, item.ID, slot,
+			tracectx.FromContext(queryCtx)).Scan(&createdID)
 		if err == nil {
 			insertedID = &createdID
 			dispatched++

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
+	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -91,9 +92,10 @@ func (s *Store) RedriveDeadLetter(ctx context.Context, id string) (job.Job, bool
 	newID := uuid.NewString()
 	created, err := scanJob(tx.QueryRow(queryCtx, `INSERT INTO jobs
 		(id,queue,kind,payload,payload_hash,status,priority,idempotency_key,available_at,
-		execution_idempotency_key,max_attempts,retry_initial_backoff_ms,retry_max_backoff_ms,retry_jitter_percent)
+		execution_idempotency_key,max_attempts,retry_initial_backoff_ms,retry_max_backoff_ms,retry_jitter_percent,trace_parent)
 		SELECT $2,queue,kind,payload,payload_hash,'queued',priority,NULL,NOW(),execution_idempotency_key,
-		max_attempts,retry_initial_backoff_ms,retry_max_backoff_ms,retry_jitter_percent FROM jobs WHERE id=$1 RETURNING `+jobColumns, id, newID))
+		max_attempts,retry_initial_backoff_ms,retry_max_backoff_ms,retry_jitter_percent,$3 FROM jobs WHERE id=$1 RETURNING `+jobColumns,
+		id, newID, tracectx.FromContext(queryCtx)))
 	if err != nil {
 		return job.Job{}, false, classify("create redriven job", err)
 	}
