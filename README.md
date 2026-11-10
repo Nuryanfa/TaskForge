@@ -12,7 +12,7 @@ outcome.
 > does not promise exactly-once execution, and must not be exposed directly to
 > an untrusted public network.
 
-## v0.6 architecture
+## v0.7 architecture
 
 ```mermaid
 flowchart LR
@@ -25,7 +25,21 @@ flowchart LR
     Relay -->|"publish events"| NATS[("NATS JetStream")]
     NATS -.->|"job.queued wake-up"| Worker
     NATS --> Consumers["event consumers"]
+    API -.->|"OTLP spans"| Jaeger[("Jaeger")]
+    Worker -.->|"OTLP spans"| Jaeger
+    Prometheus[("Prometheus<br/>SLO rules")] -.->|"scrape /metrics"| API
+    Prometheus -.->|"scrape /metrics"| Worker
+    Prometheus -.->|"scrape /metrics"| Relay
+    Grafana["Grafana"] --> Prometheus
 ```
+
+Every job carries the trace context of the span that created it, so one trace
+follows a job from the HTTP request, through PostgreSQL, to every worker
+attempt and onward through the workflow steps it causes (ADR 0013). Start
+latency and reliability SLOs have tested burn-rate alerts and a provisioned
+"what is broken?" dashboard; see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
+and [docs/SLO.md](docs/SLO.md). `make demo` burns the start-latency budget on
+purpose and walks through the alert, dashboard, and trace.
 
 PostgreSQL is the durable source of truth. The API and worker never run
 migrations automatically; `taskforge-migrate` applies embedded, versioned SQL
@@ -242,12 +256,12 @@ CI supplies a real PostgreSQL service and runs the suite with the race detector.
 
 ## Security limitations
 
-v0.6 has no authentication, authorization, TLS termination, multi-tenancy, or
+v0.7 has no authentication, authorization, TLS termination, multi-tenancy, or
 rate limiting, and the Compose NATS server has no authentication. Bind it to loopback or a trusted development network only. Job
 payloads and results are potentially sensitive; the public GET API deliberately
 does not expose them. See [SECURITY.md](SECURITY.md).
 
-## Known v0.6 limitations
+## Known v0.7 limitations
 
 - Delivery is at least once; PostgreSQL fencing cannot fence external systems.
 - Retry is bounded but still at least once; redrive can execute logical work
@@ -261,7 +275,9 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 - Workflow steps and compensations are at least once; there is no data flow
   between steps, no conditional branching, and redrive does not resume a
   workflow.
-- No gRPC, Kubernetes, web UI, Prometheus, or OpenTelemetry.
+- Trace context is not propagated through NATS events; the API-availability
+  SLO, Alertmanager routing, and log shipping are not included.
+- No gRPC, Kubernetes, or web UI.
 - Submission idempotency does not guarantee idempotent execution side effects.
 
 ## Roadmap
@@ -274,7 +290,7 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.4 | Delayed and recurring scheduling | Implemented |
 | v0.5 | Transactional outbox and NATS JetStream | Implemented |
 | v0.6 | Workflow DAGs and saga compensation | Implemented |
-| v0.7 | Metrics, tracing, dashboards, and SLOs | Planned |
+| v0.7 | Metrics, tracing, dashboards, and SLOs | Implemented (v0.7.0; API-availability SLO deferred to v0.7.1) |
 | v0.8 | High availability, Kubernetes, load, and chaos testing | Planned |
 
 ## Documentation
@@ -284,6 +300,7 @@ Start at the [documentation index](docs/README.md). Key documents:
 - [Product requirements](docs/PRD.md) and [current state](docs/CURRENT_STATE.md)
 - [System design](docs/DESIGN.md) and [data model](docs/DATA_MODEL.md)
 - [Workflows and saga compensation](docs/WORKFLOWS.md)
+- [Observability](docs/OBSERVABILITY.md) and [SLOs](docs/SLO.md)
 - [HTTP API reference](docs/API.md), [event contract](docs/EVENTS.md), and [configuration reference](docs/CONFIGURATION.md)
 - [Operations guide](docs/OPERATIONS.md) and [testing strategy](docs/TESTING.md)
 - [Architecture decision records](docs/adr/README.md)

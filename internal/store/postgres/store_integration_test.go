@@ -27,15 +27,19 @@ func integrationStore(t *testing.T) *Store {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := isolatedDatabaseURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	t.Cleanup(cancel)
-	if err := migrations.Run(ctx, databaseURL); err != nil {
+	// Migrations get their own budget: goose serializes them on one
+	// database-wide advisory lock, so parallel package runs queue here.
+	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelMigrate()
+	if err := migrations.Run(migrateCtx, databaseURL); err != nil {
 		t.Fatal("apply integration migrations")
 	}
 	// Running migrations twice verifies that an up-to-date database is success.
-	if err := migrations.Run(ctx, databaseURL); err != nil {
+	if err := migrations.Run(migrateCtx, databaseURL); err != nil {
 		t.Fatal("reapply integration migrations")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
 	store, err := Open(ctx, config.Config{
 		DatabaseURL: databaseURL, DatabaseMaxConns: 10, DatabaseMinConns: 0,
 		DatabaseConnectTimeout: 5 * time.Second, DatabaseQueryTimeout: 3 * time.Second,

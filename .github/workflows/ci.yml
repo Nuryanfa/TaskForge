@@ -80,6 +80,17 @@ jobs:
       - name: Validate Compose
         run: docker compose config --quiet
 
+      - name: Check SLO rules
+        run: |
+          docker run --rm -v "$PWD/deployments/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v3.5.0 check rules rules/slo.yml
+          docker run --rm -v "$PWD/deployments/prometheus:/p" -w /p/tests --entrypoint promtool prom/prometheus:v3.5.0 test rules slo_test.yml
+
+      - name: Check Grafana dashboard
+        run: |
+          python3 deployments/grafana/generate_dashboard.py
+          python3 -m json.tool deployments/grafana/dashboards/taskforge.json > /dev/null
+          git diff --exit-code deployments/grafana/dashboards
+
       - name: Build container
         run: docker build -f deployments/docker/Dockerfile .
 

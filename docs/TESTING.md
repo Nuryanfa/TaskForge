@@ -105,6 +105,27 @@ go test -race ./...
 Create the test database once with
 `docker compose exec postgres createdb -U taskforge taskforge_test`.
 
+## Observability evidence (v0.7)
+
+| Test | What it proves |
+| --- | --- |
+| `TestImmediateJobTraceIntegration` | HTTP span → `job.enqueue` → `job.attempt` share one trace across API, database, and worker. |
+| `TestRetriedJobAttemptsAreSiblingsIntegration` | Retries are sibling attempt spans with attempt numbers. |
+| `TestDelayedJobAttemptsAreLinkedRootsIntegration` | Client-delayed jobs start linked roots; mutation-checked (ignoring `trace_link` fails it). |
+| `TestWorkflowStepsFormCausalChainIntegration` | A saga's steps and compensations form one causal chain. |
+| `TestRecoveredJobRetryIsChildOfStoredContextIntegration` | Recovery keeps the stored parent; `lease.recovery` records counts. |
+| `TestTracingDisabledStillRunsIntegration`, `TestExporterDownJobsStillRunIntegration` | Telemetry never blocks work; export failures are counted; shutdown stays bounded. |
+| `TestMetricsCardinalityIntegration` | No entity IDs, unlisted queues, or unregistered kinds in labels. |
+| `TestStartDelayMeasuredFromReadinessIntegration`, `TestLeaseExpiryDeadLetterIsPlatformIntegration` | SLI semantics: readiness clock, handler vs platform class. |
+| `TestStalledWorkersRaiseOldestReadyAgeIntegration` | The stall gauge rises with no worker. |
+| `TestObserver*Integration` | Outcomes are reported only after commit, savepoint-isolated. |
+| `deployments/prometheus/tests/slo_test.yml` (`make slo-test`) | Each alert has a firing case and at least one silent case (within budget, slow burn vs page, unconfirmed short spike, below minimum volume, healthy targets); thresholds and volume gates are mutation-checked. Inputs use Prometheus 3's stored `le="5.0"` form. See [SLO.md](SLO.md) for the list. |
+
+The SLO burn demo (`make demo`, [SLO.md](SLO.md)) is a manual end-to-end
+check against real Prometheus, Grafana, and Jaeger. It found that Prometheus 3
+stores bucket bounds as `le="5.0"`, which hand-written `promtool` inputs had
+hidden.
+
 ## CI
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push
@@ -124,6 +145,8 @@ build, Compose validation, container build, and a clean-tree check.
 - New migrations need an upgrade test that starts from the previous version
   with representative rows.
 - Tests must not print payloads, keys, or DSNs.
+- Telemetry tests that install a global tracer provider (`telemetrytest.Setup`,
+  `telemetry.SetupTracing`) must not run in parallel and must restore it.
 - Workflow tests end with `assertWorkflowInvariants`, called when the workflow
   is quiescent (no workflow job queued or running).
 - A concurrency test that passes on its first run proves nothing until a

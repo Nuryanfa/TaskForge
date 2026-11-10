@@ -18,6 +18,7 @@ by reference instead of rewriting it.
 | [0010](0010-delayed-jobs-and-recurring-schedules.md) | Delayed jobs and transactional recurring schedules | v0.4 | Accepted |
 | [0011](0011-transactional-outbox-and-nats-jetstream.md) | Transactional outbox, single active relay, and NATS wake-ups | v0.5 | Accepted |
 | [0012](0012-workflow-dags-and-saga-compensation.md) | Workflow DAGs advance in the job's transaction, with saga compensation | v0.6 | Accepted |
+| [0013](0013-trace-context-through-the-database.md) | Trace context travels with the job through the database | v0.7 | Accepted |
 
 ## Writing a new ADR
 

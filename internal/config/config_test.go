@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,8 @@ var environmentKeys = []string{
 	"TASKFORGE_OUTBOX_POLL_INTERVAL", "TASKFORGE_OUTBOX_BATCH_SIZE",
 	"TASKFORGE_OUTBOX_BATCH_TIMEOUT", "TASKFORGE_OUTBOX_RETENTION",
 	"TASKFORGE_WORKFLOW_MAX_STEPS", "TASKFORGE_WORKFLOW_MAX_BYTES", "TASKFORGE_WORKFLOW_PAGE_SIZE",
+	"TASKFORGE_OTEL_ENDPOINT", "TASKFORGE_OTEL_SAMPLE_RATIO", "TASKFORGE_OTEL_EXPORT_TIMEOUT",
+	"TASKFORGE_METRICS_ADDR", "TASKFORGE_METRICS_QUEUES", "TASKFORGE_METRICS_DB_REFRESH",
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -354,6 +357,51 @@ func TestLoadWorkflowDefaultsAndBounds(t *testing.T) {
 		}
 		if _, err := Load(); err == nil {
 			t.Fatalf("value %s accepted", value)
+		}
+	}
+}
+
+func TestLoadObservabilityConfig(t *testing.T) {
+	clearEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OTelEndpoint != "" || cfg.OTelSampleRatio != 1 || cfg.OTelExportTimeout != 5*time.Second ||
+		cfg.MetricsDBRefresh != 15*time.Second || len(cfg.MetricsQueues) != 1 || cfg.MetricsQueues[0] != "default" {
+		t.Fatalf("observability defaults: %+v", cfg)
+	}
+	// clearEnvironment sets every key to "", which counts as set-but-empty.
+	if got := cfg.MetricsAddr("127.0.0.1:9102"); got != "" {
+		t.Fatalf("set-but-empty metrics address=%q, want disabled", got)
+	}
+	if err := os.Unsetenv("TASKFORGE_METRICS_ADDR"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.MetricsAddr("127.0.0.1:9102"); got != "127.0.0.1:9102" {
+		t.Fatalf("unset metrics address=%q, want default", got)
+	}
+	t.Setenv("TASKFORGE_METRICS_ADDR", ":9200")
+	t.Setenv("TASKFORGE_OTEL_ENDPOINT", "http://jaeger:4318")
+	t.Setenv("TASKFORGE_OTEL_SAMPLE_RATIO", "0.25")
+	t.Setenv("TASKFORGE_METRICS_QUEUES", "default,billing")
+	if cfg, err = Load(); err != nil || cfg.OTelEndpoint != "http://jaeger:4318" || cfg.OTelSampleRatio != 0.25 ||
+		len(cfg.MetricsQueues) != 2 || cfg.MetricsAddr("x:1") != ":9200" {
+		t.Fatalf("overrides cfg=%+v err=%v", cfg, err)
+	}
+	invalid := map[string]string{
+		"TASKFORGE_OTEL_ENDPOINT":       "jaeger:4318",
+		"TASKFORGE_OTEL_SAMPLE_RATIO":   "1.5",
+		"TASKFORGE_OTEL_EXPORT_TIMEOUT": "50ms",
+		"TASKFORGE_METRICS_QUEUES":      "Bad Queue",
+		"TASKFORGE_METRICS_DB_REFRESH":  "500ms",
+		"TASKFORGE_METRICS_ADDR":        "not-an-address",
+	}
+	for key, value := range invalid {
+		clearEnvironment(t)
+		t.Setenv(key, value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s=%s err=%v", key, value, err)
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/Nuryanfa/TaskForge/internal/config"
 	"github.com/Nuryanfa/TaskForge/internal/httpapi"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
+	"github.com/Nuryanfa/TaskForge/internal/telemetry"
 )
 
 func main() {
@@ -36,11 +37,29 @@ func main() {
 	}
 	defer store.Close()
 
+	process, err := telemetry.StartProcess(ctx, cfg, "taskforge-api", "127.0.0.1:9101", logger)
+	if err != nil {
+		logger.Error("metrics_listen_failed")
+		os.Exit(1)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = process.Shutdown(flushCtx)
+	}()
+	// The API settles workflows too (cancel with nothing to compensate), so it
+	// reports committed outcomes like the worker does.
+	store.SetObserver(process.Metrics)
+	dbCollector, refreshDB := telemetry.NewDBCollector(store.ObservabilitySnapshot, cfg.MetricsDBRefresh, logger)
+	process.Registry.MustRegister(dbCollector, telemetry.NewPoolCollector(store.PoolStats))
+	go refreshDB(ctx)
+
 	server := &http.Server{
 		Addr: cfg.HTTPAddr, Handler: httpapi.NewWithOptions(store, httpapi.Options{
 			PayloadMaxBytes: cfg.JobPayloadMaxBytes, ReadinessTimeout: cfg.DatabaseQueryTimeout,
 			PageSize: cfg.DeadLetterPageSize, WorkflowMaxSteps: cfg.WorkflowMaxSteps,
 			WorkflowMaxBytes: cfg.WorkflowMaxBytes, WorkflowPageSize: cfg.WorkflowPageSize,
+			Metrics: process.Metrics,
 		}),
 		ReadTimeout: cfg.ReadTimeout, ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout: cfg.WriteTimeout, IdleTimeout: cfg.IdleTimeout,

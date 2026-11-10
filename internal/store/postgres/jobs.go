@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"regexp"
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
+	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -19,7 +23,7 @@ idempotency_key, available_at, attempt_count, result, last_error_code,
 created_at, updated_at, started_at, completed_at, lease_owner, lease_expires_at,
 fencing_token, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
 retry_max_backoff_ms, retry_jitter_percent, dead_lettered_at, schedule_id, scheduled_for,
-workflow_id, workflow_step_id, workflow_role`
+workflow_id, workflow_step_id, workflow_role, trace_parent, trace_link`
 
 var errorCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
@@ -32,10 +36,11 @@ func (s *Store) CreateJob(ctx context.Context, submission job.Submission) (job.J
 	query := `INSERT INTO jobs
 		(id, queue, kind, payload, payload_hash, status, priority, idempotency_key,
 		available_at, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
-		retry_max_backoff_ms, retry_jitter_percent)
+		retry_max_backoff_ms, retry_jitter_percent, trace_parent, trace_link)
 		VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7,
 		COALESCE($13::timestamptz, NOW() + (COALESCE($14::bigint, 0) * INTERVAL '1 second')),
-		$8, $9, $10, $11, $12)`
+		$8, $9, $10, $11, $12, $15,
+		COALESCE($13::timestamptz, NOW() + (COALESCE($14::bigint, 0) * INTERVAL '1 second')) > NOW())`
 	if submission.IdempotencyKey != nil {
 		query += ` ON CONFLICT (queue, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
 	}
@@ -48,7 +53,8 @@ func (s *Store) CreateJob(ctx context.Context, submission job.Submission) (job.J
 	created, err := scanJob(s.pool.QueryRow(queryCtx, query, id, submission.Queue, submission.Kind,
 		submission.Payload, submission.Fingerprint[:], submission.Priority, submission.IdempotencyKey,
 		uuid.NewString(), s.retryPolicy.maxAttempts, s.retryPolicy.initialBackoff.Milliseconds(),
-		s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, submission.RunAt, delaySeconds))
+		s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, submission.RunAt, delaySeconds,
+		tracectx.FromContext(ctx)))
 	if err == nil {
 		return created, true, nil
 	}
@@ -190,6 +196,7 @@ func (s *Store) FailJob(ctx context.Context, execution job.Execution, failure jo
 	}
 	queryCtx, cancel := s.queryContext(ctx)
 	defer cancel()
+	queryCtx, events := withEvents(queryCtx)
 	tx, err := s.pool.BeginTx(queryCtx, pgx.TxOptions{})
 	if err != nil {
 		return classify("begin failure transaction", err)
@@ -217,6 +224,7 @@ func (s *Store) FailJob(ctx context.Context, execution job.Execution, failure jo
 	if err := tx.Commit(queryCtx); err != nil {
 		return classify("commit job failure", err)
 	}
+	s.flush(events)
 	return nil
 }
 
@@ -232,6 +240,9 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 	}
 	if command.RowsAffected() != 1 {
 		return nil, ErrStateConflict
+	}
+	if outcome == "abandoned" {
+		recordJob(ctx, current.Kind, "abandoned", failure.Code)
 	}
 	retry := failure.Retryable && current.AttemptCount < current.MaxAttempts
 	if retry && current.WorkflowID != nil && current.WorkflowRole != nil && *current.WorkflowRole == job.RoleAction {
@@ -256,6 +267,7 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 		if command.RowsAffected() != 1 {
 			return nil, ErrOwnershipLost
 		}
+		recordJob(ctx, current.Kind, "retry_scheduled", failure.Code)
 		return nil, nil
 	}
 	command, err = tx.Exec(ctx, `UPDATE jobs SET status='failed', last_error_code=$4, updated_at=NOW(),
@@ -274,6 +286,7 @@ func (s *Store) finalizeFailure(ctx context.Context, tx pgx.Tx, current job.Job,
 	if err != nil {
 		return nil, classify("insert dead letter", err)
 	}
+	recordJob(ctx, current.Kind, "dead_lettered", failure.Code)
 	code := failure.Code
 	return &terminalJob{ID: current.ID, WorkflowID: current.WorkflowID, StepID: current.WorkflowStepID,
 		Role: current.WorkflowRole, Status: job.StatusFailed, ErrorCode: &code}, nil
@@ -287,15 +300,17 @@ func (s *Store) finishJob(ctx context.Context, execution job.Execution, status j
 		return classify("begin completion transaction", err)
 	}
 	defer tx.Rollback(queryCtx)
+	queryCtx, events := withEvents(queryCtx)
 	finished := terminalJob{ID: execution.JobID, Status: status}
+	var kind string
 	err = tx.QueryRow(queryCtx, `UPDATE jobs SET status = $4, result = $5,
         last_error_code = NULLIF($6, ''), updated_at = NOW(), completed_at = NOW(),
         lease_owner = NULL, lease_expires_at = NULL
         WHERE id = $1 AND status = 'running' AND lease_owner = $2
           AND fencing_token = $3 AND lease_expires_at > NOW()
-        RETURNING workflow_id, workflow_step_id, workflow_role`, execution.JobID,
+        RETURNING workflow_id, workflow_step_id, workflow_role, kind`, execution.JobID,
 		execution.WorkerID, execution.FencingToken, status, result, errorCode).
-		Scan(&finished.WorkflowID, &finished.StepID, &finished.Role)
+		Scan(&finished.WorkflowID, &finished.StepID, &finished.Role, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrOwnershipLost
 	}
@@ -316,15 +331,18 @@ func (s *Store) finishJob(ctx context.Context, execution job.Execution, status j
 	if err := s.advanceWorkflows(queryCtx, tx, []terminalJob{finished}); err != nil {
 		return err
 	}
+	recordJob(queryCtx, kind, string(status), errorCode)
 	if err := tx.Commit(queryCtx); err != nil {
 		return classify("commit job outcome", err)
 	}
+	s.flush(events)
 	return nil
 }
 
 func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, error) {
 	queryCtx, cancel := s.queryContext(ctx)
 	defer cancel()
+	queryCtx, events := withEvents(queryCtx)
 	tx, err := s.pool.BeginTx(queryCtx, pgx.TxOptions{})
 	if err != nil {
 		return 0, classify("begin lease recovery transaction", err)
@@ -350,6 +368,16 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		return 0, classify("read expired leases", err)
 	}
 	rows.Close()
+	recoverySpan := trace.SpanFromContext(queryCtx)
+	if len(selected) > 0 {
+		// A root span only for passes that found work, so idle recovery loops
+		// export nothing. Compensations dispatched here are stamped with it.
+		var span trace.Span
+		queryCtx, span = otel.Tracer(tracectx.TracerName).Start(queryCtx, "lease.recovery",
+			trace.WithNewRoot(), trace.WithAttributes(attribute.Int("taskforge.recovery.selected", len(selected))))
+		defer span.End()
+		recoverySpan = span
+	}
 	// Lock every involved workflow first, in ascending id order, so that
 	// concurrent recovery batches cannot deadlock on workflow rows.
 	if err := lockWorkflowsInOrder(queryCtx, tx, selected); err != nil {
@@ -360,6 +388,10 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 	// lease recovery for every other job forever.
 	recovered := 0
 	var failures []error
+	defer func() {
+		recoverySpan.SetAttributes(attribute.Int("taskforge.recovery.recovered", recovered),
+			attribute.Int("taskforge.recovery.failed", len(failures)))
+	}()
 	var failedIDs []string
 	for _, item := range selected {
 		exec := job.Execution{JobID: item.ID, Attempt: item.AttemptCount, WorkerID: *item.LeaseOwner,
@@ -368,9 +400,11 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		if err != nil {
 			return 0, classify("begin recovery savepoint", err)
 		}
-		finished, err := s.finalizeFailure(queryCtx, savepoint, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
+		// Events of a savepoint count only if the savepoint is released.
+		savepointCtx, savepointEvents := withEvents(queryCtx)
+		finished, err := s.finalizeFailure(savepointCtx, savepoint, item, exec, job.Failure{Code: "LEASE_EXPIRED", Retryable: true}, "abandoned")
 		if err == nil && finished != nil {
-			err = s.advanceWorkflows(queryCtx, savepoint, []terminalJob{*finished})
+			err = s.advanceWorkflows(savepointCtx, savepoint, []terminalJob{*finished})
 		}
 		if err != nil {
 			_ = savepoint.Rollback(queryCtx)
@@ -384,11 +418,13 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, batchSize int) (int, err
 		if err := savepoint.Commit(queryCtx); err != nil {
 			return 0, classify("release recovery savepoint", err)
 		}
+		events.merge(savepointEvents)
 		recovered++
 	}
 	if err := tx.Commit(queryCtx); err != nil {
 		return 0, classify("commit lease recovery", err)
 	}
+	s.flush(events)
 	if len(failures) > 0 {
 		return recovered, &RecoveryError{JobIDs: failedIDs, Err: errors.Join(failures...)}
 	}
@@ -404,7 +440,8 @@ func scanJob(row rowScanner) (job.Job, error) {
 		&found.UpdatedAt, &found.StartedAt, &found.CompletedAt, &found.LeaseOwner,
 		&found.LeaseExpiresAt, &found.FencingToken, &found.ExecutionKey, &found.MaxAttempts,
 		&initialMS, &maxMS, &found.JitterPercent, &found.DeadLetteredAt, &found.ScheduleID, &found.ScheduledFor,
-		&found.WorkflowID, &found.WorkflowStepID, &found.WorkflowRole)
+		&found.WorkflowID, &found.WorkflowStepID, &found.WorkflowRole,
+		&found.TraceParent, &found.TraceLink)
 	found.InitialBackoff = time.Duration(initialMS) * time.Millisecond
 	found.MaxBackoff = time.Duration(maxMS) * time.Millisecond
 	return found, err

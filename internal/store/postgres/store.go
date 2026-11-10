@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Nuryanfa/TaskForge/internal/config"
@@ -18,6 +19,8 @@ type Store struct {
 	queryTimeout   time.Duration
 	maxResultBytes int64
 	retryPolicy    retryPolicy
+	observerMu     sync.RWMutex
+	observer       Observer
 }
 
 type retryPolicy struct {
@@ -96,3 +99,6 @@ func classify(operation string, err error) error {
 	}
 	return fmt.Errorf("%s: %w", operation, err)
 }
+
+// PoolStats exposes connection pool statistics for metrics.
+func (s *Store) PoolStats() *pgxpool.Stat { return s.pool.Stat() }

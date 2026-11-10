@@ -13,7 +13,6 @@ import (
 
 	"github.com/Nuryanfa/TaskForge/internal/config"
 	"github.com/Nuryanfa/TaskForge/internal/httpapi"
-	"github.com/Nuryanfa/TaskForge/internal/migrations"
 	"github.com/Nuryanfa/TaskForge/internal/natsbus"
 	"github.com/Nuryanfa/TaskForge/internal/relay"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
@@ -45,9 +44,7 @@ func TestOutboxRelayAndWakeupsEndToEndIntegration(t *testing.T) {
 	databaseURL := isolatedURL(t, baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := migrations.Run(ctx, databaseURL); err != nil {
-		t.Fatal("apply migrations")
-	}
+	migrateIsolated(t, databaseURL)
 	cfg := config.Config{
 		DatabaseURL: databaseURL, DatabaseMaxConns: 8, DatabaseMinConns: 0,
 		DatabaseConnectTimeout: 5 * time.Second, DatabaseQueryTimeout: 2 * time.Second,

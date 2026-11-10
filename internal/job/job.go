@@ -54,6 +54,10 @@ type Job struct {
 	WorkflowID     *string
 	WorkflowStepID *int64
 	WorkflowRole   *string
+	// TraceParent is the W3C traceparent of the span that caused the job;
+	// TraceLink makes attempts link to it instead of parenting (delayed jobs).
+	TraceParent *string
+	TraceLink   bool
 }
 
 // Execution identifies one ownership epoch. Its values must accompany every

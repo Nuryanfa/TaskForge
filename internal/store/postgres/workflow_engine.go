@@ -152,6 +152,7 @@ func (s *Store) onJobTerminal(ctx context.Context, tx pgx.Tx, item terminalJob) 
 				completed_at=NOW(), updated_at=NOW() WHERE id=$1`, wf.id); err != nil {
 				return classify("mark compensation failed", err)
 			}
+			recordWorkflow(ctx, string(job.WorkflowCompensationFailed))
 		}
 	}
 	return settleWorkflow(ctx, tx, wf.id)
@@ -289,5 +290,6 @@ func settleWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) error {
 		WHERE id=$1`, wf.id, next); err != nil {
 		return classify("settle workflow", err)
 	}
+	recordWorkflow(ctx, string(next))
 	return nil
 }

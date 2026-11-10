@@ -85,6 +85,17 @@ job, including the ones workers create later.
 | `TASKFORGE_RETRY_MAX_BACKOFF` | `60s` | `1ms..30m` | Cap for exponential growth. |
 | `TASKFORGE_RETRY_JITTER_PERCENT` | `20` | `0..100` | Deterministic ± jitter; result never exceeds max. |
 
+## Observability (v0.7)
+
+| Variable | Default | Bounds | Used by | Notes |
+| --- | --- | --- | --- | --- |
+| `TASKFORGE_OTEL_ENDPOINT` | empty (tracing off) | `http://` or `https://` URL | A W R | OTLP/HTTP collector, e.g. `http://jaeger:4318`; `/v1/traces` is appended when no path is given. |
+| `TASKFORGE_OTEL_SAMPLE_RATIO` | `1.0` | `0..1` | A W R | Root sampling ratio; parent-based after that. |
+| `TASKFORGE_OTEL_EXPORT_TIMEOUT` | `5s` | `100ms..1m` | A W R | Per-batch export bound; failures are counted, never retried. |
+| `TASKFORGE_METRICS_ADDR` | A `127.0.0.1:9101`, W `127.0.0.1:9102`, R `127.0.0.1:9103` | `host:port`; set empty to disable | A W R | Separate from the API listener. A busy address fails startup. |
+| `TASKFORGE_METRICS_QUEUES` | `default` | ≤ 32 queue identifiers | A W | Queues kept as metric labels; others become `other`. |
+| `TASKFORGE_METRICS_DB_REFRESH` | `15s` | `1s..5m` | A | Database snapshot interval for the cached gauges. |
+
 ## Compose and tests only
 
 | Variable | Default | Notes |
@@ -94,6 +105,7 @@ job, including the ones workers create later.
 | `TASKFORGE_TEST_NATS_URL` | unset | Enables NATS JetStream integration and event end-to-end tests (also needs the database URL). |
 | `TASKFORGE_NATS_PORT` | `4222` | Host port for NATS mapped by `compose.yaml` (loopback only). |
 | `TASKFORGE_SOAK_SEED` | unset | Reproduces a specific run of the randomized workflow soak test. |
+| `TASKFORGE_POSTGRES_PORT`, `TASKFORGE_JAEGER_PORT`, `TASKFORGE_PROMETHEUS_PORT`, `TASKFORGE_GRAFANA_PORT` | 5432, 16686, 9090, 3000 | Host ports for Compose services (loopback only). |
 
 ## Tuning guidance
 

@@ -55,6 +55,9 @@ services:
       TASKFORGE_WORKFLOW_MAX_STEPS: ${TASKFORGE_WORKFLOW_MAX_STEPS:-32}
       TASKFORGE_WORKFLOW_MAX_BYTES: ${TASKFORGE_WORKFLOW_MAX_BYTES:-262144}
       TASKFORGE_WORKFLOW_PAGE_SIZE: ${TASKFORGE_WORKFLOW_PAGE_SIZE:-50}
+      TASKFORGE_OTEL_ENDPOINT: ${TASKFORGE_OTEL_ENDPOINT:-http://jaeger:4318}
+      TASKFORGE_OTEL_SAMPLE_RATIO: ${TASKFORGE_OTEL_SAMPLE_RATIO:-1}
+      TASKFORGE_METRICS_ADDR: ":9101"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -85,6 +88,9 @@ services:
       TASKFORGE_RETRY_MAX_BACKOFF: ${TASKFORGE_RETRY_MAX_BACKOFF:-60s}
       TASKFORGE_RETRY_JITTER_PERCENT: ${TASKFORGE_RETRY_JITTER_PERCENT:-20}
       TASKFORGE_NATS_URL: nats://nats:4222
+      TASKFORGE_OTEL_ENDPOINT: ${TASKFORGE_OTEL_ENDPOINT:-http://jaeger:4318}
+      TASKFORGE_OTEL_SAMPLE_RATIO: ${TASKFORGE_OTEL_SAMPLE_RATIO:-1}
+      TASKFORGE_METRICS_ADDR: ":9102"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -103,12 +109,53 @@ services:
       TASKFORGE_OUTBOX_POLL_INTERVAL: ${TASKFORGE_OUTBOX_POLL_INTERVAL:-200ms}
       TASKFORGE_OUTBOX_BATCH_SIZE: ${TASKFORGE_OUTBOX_BATCH_SIZE:-100}
       TASKFORGE_OUTBOX_RETENTION: ${TASKFORGE_OUTBOX_RETENTION:-24h}
+      TASKFORGE_OTEL_ENDPOINT: ${TASKFORGE_OTEL_ENDPOINT:-http://jaeger:4318}
+      TASKFORGE_OTEL_SAMPLE_RATIO: ${TASKFORGE_OTEL_SAMPLE_RATIO:-1}
+      TASKFORGE_METRICS_ADDR: ":9103"
     depends_on:
       migrate:
         condition: service_completed_successfully
       nats:
         condition: service_healthy
 
+  # Observability stack (v0.7). All UIs bind to loopback only.
+  jaeger:
+    image: jaegertracing/all-in-one:1.71.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${TASKFORGE_JAEGER_PORT:-16686}:16686"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deployments/prometheus/rules:/etc/prometheus/rules:ro
+      - taskforge-prometheus:/prometheus
+    ports:
+      - "127.0.0.1:${TASKFORGE_PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/taskforge.json
+    volumes:
+      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - jaeger
+    ports:
+      - "127.0.0.1:${TASKFORGE_GRAFANA_PORT:-3000}:3000"
+
 volumes:
   taskforge-postgres:
   taskforge-nats:
+  taskforge-prometheus:

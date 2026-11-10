@@ -10,6 +10,10 @@ import (
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
 	"github.com/Nuryanfa/TaskForge/internal/store/postgres"
+	"github.com/Nuryanfa/TaskForge/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Store interface {
@@ -36,6 +40,8 @@ type Options struct {
 	// Wake, when non-nil, delivers hints that a job may be claimable now. It
 	// only shortens the poll wait; PostgreSQL still decides every claim.
 	Wake <-chan struct{}
+	// Metrics, when non-nil, records start delay and attempt durations.
+	Metrics *telemetry.Metrics
 }
 
 type Runner struct {
@@ -129,6 +135,13 @@ func (r *Runner) runRecovery(ctx context.Context) {
 		if recovered > 0 {
 			r.logger.Info("worker_jobs_recovered", "count", recovered)
 		}
+		if r.options.Metrics != nil {
+			r.options.Metrics.LeaseRecovery("recovered", recovered)
+			var partial *postgres.RecoveryError
+			if errors.As(err, &partial) {
+				r.options.Metrics.LeaseRecovery("failed", len(partial.JobIDs))
+			}
+		}
 		if err != nil && ctx.Err() == nil {
 			// Job IDs identify what an operator must inspect; the raw error
 			// may contain database detail and is never logged.
@@ -168,7 +181,18 @@ type executionResult struct {
 }
 
 func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
-	executionCtx, cancelExecution := context.WithTimeout(context.Background(), r.options.ExecutionTimeout)
+	// The attempt span is attached to the handler and persistence contexts
+	// explicitly: both derive from context.Background() so that shutdown does
+	// not abort them, and the store stamps this span on any job it dispatches.
+	spanCtx, span := telemetry.StartAttempt(context.Background(), claimed)
+	defer span.End()
+	started := time.Now()
+	if r.options.Metrics != nil && claimed.Job.StartedAt != nil {
+		// Both timestamps come from the claim statement's database clock.
+		r.options.Metrics.StartDelay(claimed.Job.Queue, claimed.Job.Kind, claimed.Job.StartedAt.Sub(claimed.Job.AvailableAt))
+	}
+	attempt := attemptScope{span: span, ctx: spanCtx, kind: claimed.Job.Kind, started: started}
+	executionCtx, cancelExecution := context.WithTimeout(spanCtx, r.options.ExecutionTimeout)
 	defer cancelExecution()
 	done := make(chan executionResult, 1)
 	go func() {
@@ -191,11 +215,11 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 			if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
 				outcome = executionResult{failure: &job.Failure{Code: ErrorExecutionTimeout, Retryable: true}}
 			}
-			r.persistOutcome(claimed.Execution, outcome)
+			r.persistOutcome(attempt, claimed.Execution, outcome)
 			return
 		case <-executionCtx.Done():
 			if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-				r.persistOutcome(claimed.Execution, executionResult{failure: &job.Failure{Code: ErrorExecutionTimeout, Retryable: true}})
+				r.persistOutcome(attempt, claimed.Execution, executionResult{failure: &job.Failure{Code: ErrorExecutionTimeout, Retryable: true}})
 			}
 			return
 		case <-heartbeat.C:
@@ -205,8 +229,9 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 			if err != nil {
 				cancelExecution()
 				if !errors.Is(err, postgres.ErrOwnershipLost) {
-					r.logger.Error("worker_heartbeat_failed")
+					r.logger.Error("worker_heartbeat_failed", "trace_id", telemetry.TraceID(attempt.ctx))
 				}
+				r.recordLeaseLost(attempt)
 				return
 			}
 		case <-runCtx.Done():
@@ -217,28 +242,83 @@ func (r *Runner) execute(runCtx context.Context, claimed job.Claimed) {
 			}
 		case <-shutdown:
 			cancelExecution()
-			r.persistOutcome(claimed.Execution, executionResult{failure: &job.Failure{Code: ErrorShutdownTimeout, Retryable: true}})
+			r.persistOutcome(attempt, claimed.Execution, executionResult{failure: &job.Failure{Code: ErrorShutdownTimeout, Retryable: true}})
 			return
 		}
 	}
 }
 
-func (r *Runner) persistOutcome(execution job.Execution, outcome executionResult) {
-	persistCtx, cancel := context.WithTimeout(context.Background(), r.options.ShutdownTimeout)
+// attemptScope carries one attempt's span and timing to persistOutcome.
+type attemptScope struct {
+	span    trace.Span
+	ctx     context.Context
+	kind    string
+	started time.Time
+}
+
+func (r *Runner) persistOutcome(attempt attemptScope, execution job.Execution, outcome executionResult) {
+	persistCtx, cancel := context.WithTimeout(attempt.ctx, r.options.ShutdownTimeout)
 	defer cancel()
 	var err error
 	if outcome.failure == nil {
 		err = r.store.CompleteJob(persistCtx, execution, outcome.result)
 		if errors.Is(err, postgres.ErrInvalidResult) {
 			// Retrying would produce the same rejected result, so fail permanently
-			// now instead of waiting for lease expiry.
-			err = r.store.FailJob(persistCtx, execution, job.Failure{Code: ErrorInvalidResult, Retryable: false})
+			// now instead of waiting for lease expiry. Telemetry records this
+			// failure, which is what was persisted, not the handler's success.
+			outcome = executionResult{failure: &job.Failure{Code: ErrorInvalidResult, Retryable: false}}
+			err = r.store.FailJob(persistCtx, execution, *outcome.failure)
 		}
 	} else {
 		err = r.store.FailJob(persistCtx, execution, *outcome.failure)
 	}
+	r.recordAttempt(attempt, outcome, err)
 	if err != nil && !errors.Is(err, postgres.ErrOwnershipLost) {
-		r.logger.Error("worker_persist_outcome_failed")
+		r.logger.Error("worker_persist_outcome_failed", "trace_id", telemetry.TraceID(attempt.ctx))
+	}
+}
+
+// Attempt-level outcomes for spans and the attempt-duration histogram. They
+// describe one attempt, unlike the job outcomes the store reports after
+// commit (succeeded, retry_scheduled, dead_lettered, abandoned).
+const (
+	attemptSucceeded = "succeeded"
+	attemptFailed    = "failed"
+	attemptLeaseLost = "lease_lost"
+)
+
+func (r *Runner) recordAttempt(attempt attemptScope, outcome executionResult, persistErr error) {
+	label := attemptSucceeded
+	if outcome.failure != nil {
+		label = attemptFailed
+		attempt.span.SetAttributes(attribute.String("taskforge.job.error_code", outcome.failure.Code),
+			attribute.Bool("taskforge.job.retryable", outcome.failure.Retryable))
+		attempt.span.SetStatus(codes.Error, outcome.failure.Code)
+	}
+	if persistErr != nil {
+		// The outcome above was decided but not saved; the job's real fate is
+		// decided by whoever owns it now (lease recovery or another worker).
+		attempt.span.SetAttributes(attribute.Bool("taskforge.job.persisted", false))
+		message := "outcome not persisted"
+		if errors.Is(persistErr, postgres.ErrOwnershipLost) {
+			message = "outcome not persisted: ownership lost"
+		}
+		attempt.span.SetStatus(codes.Error, message)
+	}
+	r.finishAttempt(attempt, label)
+}
+
+// recordLeaseLost records an attempt abandoned because its lease could not be
+// renewed; recovery or the new owner decides what happens to the job.
+func (r *Runner) recordLeaseLost(attempt attemptScope) {
+	attempt.span.SetStatus(codes.Error, "lease lost")
+	r.finishAttempt(attempt, attemptLeaseLost)
+}
+
+func (r *Runner) finishAttempt(attempt attemptScope, label string) {
+	attempt.span.SetAttributes(attribute.String("taskforge.job.outcome", label))
+	if r.options.Metrics != nil {
+		r.options.Metrics.AttemptDuration(attempt.kind, label, time.Since(attempt.started))
 	}
 }
 

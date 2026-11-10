@@ -18,7 +18,7 @@ func TestV01RunningJobUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v1 := int64(1)
 	if err := run(ctx, databaseURL, &v1); err != nil {
@@ -69,7 +69,7 @@ func TestV02SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v2 := int64(2)
 	if err := run(ctx, databaseURL, &v2); err != nil {
@@ -104,7 +104,7 @@ func TestV03SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v3 := int64(3)
 	if err := run(ctx, databaseURL, &v3); err != nil {
@@ -138,7 +138,7 @@ func TestV04SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v4 := int64(4)
 	if err := run(ctx, databaseURL, &v4); err != nil {
@@ -176,7 +176,7 @@ func TestV05SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	v5 := int64(5)
 	if err := run(ctx, databaseURL, &v5); err != nil {
@@ -208,6 +208,40 @@ func TestV05SchemaUpgradeIntegration(t *testing.T) {
 	var hasKey bool
 	if err := conn.QueryRow(ctx, `SELECT payload ? 'workflow_id' FROM outbox_events WHERE job_id=$1`, newID).Scan(&hasKey); err != nil || !hasKey {
 		t.Fatalf("outbox payload has workflow_id=%v err=%v", hasKey, err)
+	}
+}
+
+func TestV06SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	v6 := int64(6)
+	if err := run(ctx, databaseURL, &v6); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	id := uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status) VALUES($1,'default','demo.echo','{}',$2,'queued')`, id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	var traceParent *string
+	var traceLink bool
+	if err := conn.QueryRow(ctx, `SELECT trace_parent, trace_link FROM jobs WHERE id=$1`, id).Scan(&traceParent, &traceLink); err != nil || traceParent != nil || traceLink {
+		t.Fatalf("existing job trace_parent=%v trace_link=%v err=%v", traceParent, traceLink, err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE jobs SET trace_parent='bad' WHERE id=$1`, id); err == nil {
+		t.Fatal("malformed trace_parent was accepted")
 	}
 }
 

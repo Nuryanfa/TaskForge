@@ -1,0 +1,18 @@
+# SLO burn demo override (docs/SLO.md):
+#   docker compose -f compose.yaml -f compose.demo.yaml up -d --build
+# One slow worker and demo-speed alert windows make the start-latency budget
+# burn visibly within minutes. Not for production.
+services:
+  taskforge-worker:
+    environment:
+      TASKFORGE_WORKER_CONCURRENCY: "1"
+
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/demo/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Compose replaces the whole command list, so keep the base retention:
+      # the demo shares the taskforge-prometheus volume with the normal stack.
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./deployments/prometheus/demo:/etc/prometheus/demo:ro
