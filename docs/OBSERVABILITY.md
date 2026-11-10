@@ -93,8 +93,10 @@ submits unlisted queues and kinds and asserts this.
 
 **Database gauges** come from one bounded snapshot in the API process every
 `TASKFORGE_METRICS_DB_REFRESH` (15 s); a scrape never queries the database.
-After a failed refresh the gauges disappear rather than going stale, which
-fires `TaskForgeDBCollectorAbsent`. With several API replicas, use `max()`.
+One or two failed refreshes keep the last snapshot, so a single slow query
+does not reset a pending `TaskForgeJobsNotStarting`. After three in a row
+(about 45 s) the gauges disappear rather than going stale, which fires
+`TaskForgeDBCollectorAbsent`. With several API replicas, use `max()`.
 
 **Counting semantics.** Outcomes are reported only after their transaction
 commits, so rolled-back or fenced-out work is never counted. A process that

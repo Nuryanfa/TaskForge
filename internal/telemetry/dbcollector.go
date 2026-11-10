@@ -25,11 +25,14 @@ var (
 )
 
 // dbCollector exports the last successful database snapshot. A scrape never
-// queries the database. After a failed refresh it exports nothing, so the
-// absent() alert fires instead of dashboards showing stale numbers.
+// queries the database. A brief failure (fewer than maxFailedRefreshes in a
+// row) keeps the last snapshot, so one slow refresh does not reset pending
+// alerts; a sustained failure exports nothing, so the absent() alert fires
+// instead of dashboards showing stale numbers.
 type dbCollector struct {
 	mu       sync.RWMutex
 	snapshot *postgres.Snapshot
+	failures int
 }
 
 // NewDBCollector returns the collector and the refresh loop to run in its own
@@ -41,13 +44,7 @@ func NewDBCollector(snapshot func(context.Context) (postgres.Snapshot, error), i
 		defer ticker.Stop()
 		for {
 			current, err := snapshot(ctx)
-			collector.mu.Lock()
-			if err != nil {
-				collector.snapshot = nil
-			} else {
-				collector.snapshot = &current
-			}
-			collector.mu.Unlock()
+			collector.update(current, err)
 			if err != nil && ctx.Err() == nil {
 				logger.Error("metrics_snapshot_failed")
 			}
@@ -59,6 +56,21 @@ func NewDBCollector(snapshot func(context.Context) (postgres.Snapshot, error), i
 		}
 	}
 	return collector, refresh
+}
+
+// update records one refresh result.
+func (c *dbCollector) update(current postgres.Snapshot, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		c.failures++
+		if c.failures >= maxFailedRefreshes {
+			c.snapshot = nil
+		}
+		return
+	}
+	c.failures = 0
+	c.snapshot = &current
 }
 
 func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -113,3 +125,7 @@ func (p poolCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(poolDescs["idle"], prometheus.GaugeValue, float64(stat.IdleConns()))
 	ch <- prometheus.MustNewConstMetric(poolDescs["max"], prometheus.GaugeValue, float64(stat.MaxConns()))
 }
+
+// maxFailedRefreshes is how many consecutive failed refreshes drop the
+// exported snapshot: at the default 15 s interval, about 45 s of stale data.
+const maxFailedRefreshes = 3

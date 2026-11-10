@@ -32,6 +32,41 @@ func gatherValue(t *testing.T, registry *prometheus.Registry, name, labelValue s
 	return 0, false
 }
 
+// TestDBCollectorToleratesBriefRefreshFailures: one or two failed refreshes
+// (a slow query, a pool hiccup) keep the last snapshot, so the stall alert's
+// pending state is not reset; a sustained failure drops the series so the
+// absent() alert can fire; the next success restores them.
+func TestDBCollectorToleratesBriefRefreshFailures(t *testing.T) {
+	collector := &dbCollector{}
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
+	down := errors.New("database down")
+	exported := func() (float64, bool) {
+		return gatherValue(t, registry, "taskforge_oldest_ready_job_age_seconds", "")
+	}
+
+	collector.update(postgres.Snapshot{OldestReadyAge: 90 * time.Second}, nil)
+	for failure := 1; failure < maxFailedRefreshes; failure++ {
+		collector.update(postgres.Snapshot{}, down)
+		if value, ok := exported(); !ok || value != 90 {
+			t.Fatalf("after %d failed refresh(es): age=%v exported=%v; want the last snapshot kept", failure, value, ok)
+		}
+	}
+	collector.update(postgres.Snapshot{}, down)
+	if _, ok := exported(); ok {
+		t.Fatalf("still exported after %d consecutive failed refreshes; absent() alerting depends on their absence", maxFailedRefreshes)
+	}
+	collector.update(postgres.Snapshot{OldestReadyAge: 30 * time.Second}, nil)
+	if value, ok := exported(); !ok || value != 30 {
+		t.Fatalf("after recovery: age=%v exported=%v", value, ok)
+	}
+	// The failure count restarts after a success.
+	collector.update(postgres.Snapshot{}, down)
+	if _, ok := exported(); !ok {
+		t.Fatal("a single failure after recovery dropped the series")
+	}
+}
+
 func TestDBCollectorServesCachedValues(t *testing.T) {
 	var calls atomic.Int32
 	fail := atomic.Bool{}

@@ -46,8 +46,8 @@ already exist.
   claimed (for example every worker is down). `TaskForgeJobsNotStarting` reads
   the oldest ready job's age from the database instead.
 - **Missing signals.** If the API or its database connection is down, the
-  database gauges disappear (the collector exports nothing after a failed
-  refresh) and `TaskForgeDBCollectorAbsent` fires.
+  database gauges disappear (the collector exports nothing after three failed
+  refreshes in a row) and `TaskForgeDBCollectorAbsent` fires.
 
 Every alert has a `promtool` case where it fires and one where it stays
 silent. The silent cases cover: burn within budget (both SLOs), traffic below
