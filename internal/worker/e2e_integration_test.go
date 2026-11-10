@@ -31,9 +31,7 @@ func TestEchoEndToEndIntegration(t *testing.T) {
 	databaseURL := isolatedURL(t, baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := migrations.Run(ctx, databaseURL); err != nil {
-		t.Fatal("apply migrations")
-	}
+	migrateIsolated(t, databaseURL)
 	cfg := config.Config{
 		DatabaseURL: databaseURL, DatabaseMaxConns: 5, DatabaseMinConns: 0,
 		DatabaseConnectTimeout: 5 * time.Second, DatabaseQueryTimeout: 2 * time.Second,
@@ -122,9 +120,7 @@ func TestRecurringScheduleEndToEndIntegration(t *testing.T) {
 	databaseURL := isolatedURL(t, baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := migrations.Run(ctx, databaseURL); err != nil {
-		t.Fatal("apply migrations")
-	}
+	migrateIsolated(t, databaseURL)
 	cfg := config.Config{
 		DatabaseURL: databaseURL, DatabaseMaxConns: 5, DatabaseMinConns: 0,
 		DatabaseConnectTimeout: 5 * time.Second, DatabaseQueryTimeout: 2 * time.Second,
@@ -196,6 +192,18 @@ func performJSON(handler http.Handler, method, path, body string) *httptest.Resp
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+// migrateIsolated applies migrations under their own budget: goose serializes
+// every migration on one database-wide advisory lock, so under a parallel
+// package run this waits behind the store suite's per-test migrations.
+func migrateIsolated(t *testing.T, databaseURL string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := migrations.Run(ctx, databaseURL); err != nil {
+		t.Fatal("apply migrations")
+	}
 }
 
 func isolatedURL(t *testing.T, baseURL string) string {
