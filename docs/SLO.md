@@ -49,9 +49,13 @@ already exist.
   database gauges disappear (the collector exports nothing after a failed
   refresh) and `TaskForgeDBCollectorAbsent` fires.
 
-Every alert has `promtool` tests, including "silent below minimum volume" and
-"handler failures never fire the reliability alert". Removing the volume gate
-makes the tests fail.
+Every alert has a `promtool` case where it fires and one where it stays
+silent. The silent cases cover: burn within budget (both SLOs), traffic below
+the minimum volume (both SLOs), a slow burn that must not page (both SLOs), a
+five-minute reliability spike that the 1h window does not confirm, handler
+failures (never platform budget), ready jobs younger than 60 s, and every
+target up with database gauges present. The thresholds and volume gates were
+mutation-checked: loosening any of them makes the suite fail.
 
 ## Burn the budget (portfolio demo)
 

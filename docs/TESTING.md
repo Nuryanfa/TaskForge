@@ -119,7 +119,7 @@ Create the test database once with
 | `TestStartDelayMeasuredFromReadinessIntegration`, `TestLeaseExpiryDeadLetterIsPlatformIntegration` | SLI semantics: readiness clock, handler vs platform class. |
 | `TestStalledWorkersRaiseOldestReadyAgeIntegration` | The stall gauge rises with no worker. |
 | `TestObserver*Integration` | Outcomes are reported only after commit, savepoint-isolated. |
-| `deployments/prometheus/tests/slo_test.yml` (`make slo-test`) | Every alert fires on burn and stays silent otherwise, including below minimum volume; inputs use Prometheus 3's stored `le="5.0"` form. |
+| `deployments/prometheus/tests/slo_test.yml` (`make slo-test`) | Each alert has a firing case and at least one silent case (within budget, slow burn vs page, unconfirmed short spike, below minimum volume, healthy targets); thresholds and volume gates are mutation-checked. Inputs use Prometheus 3's stored `le="5.0"` form. See [SLO.md](SLO.md) for the list. |
 
 The SLO burn demo (`make demo`, [SLO.md](SLO.md)) is a manual end-to-end
 check against real Prometheus, Grafana, and Jaeger. It found that Prometheus 3

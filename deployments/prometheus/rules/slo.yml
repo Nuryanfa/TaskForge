@@ -101,7 +101,7 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: Ready jobs have waited more than 60 seconds; no worker is claiming work.
+          summary: Ready jobs have waited more than 60 seconds; workers are down or cannot keep up.
       - alert: TaskForgeDBCollectorAbsent
         expr: absent(taskforge_jobs)
         for: 5m

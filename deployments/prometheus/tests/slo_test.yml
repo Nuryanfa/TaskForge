@@ -120,7 +120,7 @@ tests:
           - exp_labels:
               severity: page
             exp_annotations:
-              summary: Ready jobs have waited more than 60 seconds; no worker is claiming work.
+              summary: Ready jobs have waited more than 60 seconds; workers are down or cannot keep up.
 
   # The database collector (API process) stopped reporting.
   - interval: 1m
@@ -154,5 +154,94 @@ tests:
             exp_annotations:
               summary: A TaskForge process is not being scraped.
       - eval_time: 5m
+        alertname: TaskForgeDBCollectorAbsent
+        exp_alerts: []
+
+  # About 5.7 % platform dead letters over 6 hours: above 6x the 0.5 % budget
+  # but below 14.4x, so only the ticket-level reliability alert fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="succeeded",class="none"}'
+        values: '0+10x420'
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="dead_lettered",class="platform"}'
+        values: '0+0.6x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TaskForgeReliabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeReliabilitySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: reliability
+            exp_annotations:
+              summary: Jobs are being dead-lettered by platform failures, burning the error budget steadily.
+
+  # 0.3 % platform dead letters is within the 0.5 % budget: both silent.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="succeeded",class="none"}'
+        values: '0+10x420'
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="dead_lettered",class="platform"}'
+        values: '0+0.03x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeReliabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeReliabilitySlowBurn
+        exp_alerts: []
+
+  # A five-minute spike of platform dead letters (about 13 % over 5m) after an
+  # hour of clean traffic: the 1h window stays near 1.2 %, below 14.4x, so the
+  # page stays silent. Both windows must agree before anyone is paged.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="succeeded",class="none"}'
+        values: '0+10x80'
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="dead_lettered",class="platform"}'
+        values: '0x70 1.5+1.5x10'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeReliabilityFastBurn
+        exp_alerts: []
+
+  # Every outcome is a platform dead letter, but only 6 per hour: below the
+  # minimum volume, so neither reliability alert fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="dead_lettered",class="platform"}'
+        values: '0+0.1x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeReliabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeReliabilitySlowBurn
+        exp_alerts: []
+
+  # Ready jobs that wait less than 60 seconds are normal queueing: silent.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_oldest_ready_job_age_seconds{instance="api:9101",job="taskforge-api"}'
+        values: '30x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TaskForgeJobsNotStarting
+        exp_alerts: []
+
+  # Every target up and database gauges present: silent.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="taskforge-worker",instance="worker:9102"}'
+        values: '1x10'
+      - series: 'taskforge_jobs{state="ready",instance="api:9101",job="taskforge-api"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TaskForgeTargetDown
+        exp_alerts: []
+      - eval_time: 6m
         alertname: TaskForgeDBCollectorAbsent
         exp_alerts: []
