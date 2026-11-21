@@ -1,7 +1,11 @@
 package httpapi
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,4 +103,76 @@ func TestEnqueueSpanIsStoredAsTraceParent(t *testing.T) {
 		}
 	}
 	t.Fatal("no job.enqueue span recorded")
+}
+
+// TestAPITracesWithoutMetrics: tracing does not depend on the metrics
+// registry being configured.
+func TestAPITracesWithoutMetrics(t *testing.T) {
+	exporter := telemetrytest.Setup(t)
+	handler := NewWithOptions(&fakeStore{}, Options{PayloadMaxBytes: 4096, ReadinessTimeout: time.Second})
+	serve(handler, http.MethodGet, "/v1/jobs/00000000-0000-4000-8000-000000000001", "")
+	if spans := exporter.GetSpans(); len(spans) != 1 {
+		t.Fatalf("server spans=%d, want 1", len(spans))
+	}
+}
+
+func submittedWithDelayed(t *testing.T, registry *prometheus.Registry, delayed string) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, family := range families {
+		if family.GetName() != "taskforge_jobs_submitted_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "delayed" && label.GetValue() == delayed {
+					total += metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return total
+}
+
+// TestSubmitDelayedLabelFollowsTraceLink: the delayed label uses the same
+// rule as tracing (the job was not ready at creation), so delay_seconds 0 is
+// not delayed.
+func TestSubmitDelayedLabelFollowsTraceLink(t *testing.T) {
+	telemetrytest.Setup(t)
+	store := &fakeStore{created: true, value: job.Job{ID: "00000000-0000-4000-8000-000000000001", Queue: "default", Kind: "demo.echo", Status: job.StatusQueued}}
+	handler, registry := instrumentedHandler(t, store)
+	serve(handler, http.MethodPost, "/v1/jobs", `{"kind":"demo.echo","payload":{"message":"now"},"delay_seconds":0}`)
+	if got := submittedWithDelayed(t, registry, "false"); got != 1 {
+		t.Fatalf("delay_seconds 0 counted delayed=false %v times, want 1", got)
+	}
+	store.value.TraceLink = true
+	serve(handler, http.MethodPost, "/v1/jobs", `{"kind":"demo.echo","payload":{"message":"later"},"delay_seconds":60}`)
+	if got := submittedWithDelayed(t, registry, "true"); got != 1 {
+		t.Fatalf("delay_seconds 60 counted delayed=true %v times, want 1", got)
+	}
+}
+
+type panickingStore struct{ fakeStore }
+
+func (p *panickingStore) GetJob(context.Context, string) (job.Job, error) { panic("store bug") }
+
+// TestAPIPanicReturnsErrorEnvelope: a handler panic answers with the API's
+// usual error body (INTERNAL_ERROR, request ID) and is counted as a 500.
+func TestAPIPanicReturnsErrorEnvelope(t *testing.T) {
+	telemetrytest.Setup(t)
+	registry := prometheus.NewRegistry()
+	metrics := telemetry.NewMetrics(registry, []string{"default"})
+	handler := NewWithOptions(&panickingStore{}, Options{PayloadMaxBytes: 4096, ReadinessTimeout: time.Second, Metrics: metrics,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	response := serve(handler, http.MethodGet, "/v1/jobs/00000000-0000-4000-8000-000000000001", "")
+	if response.Code != http.StatusInternalServerError || errorCode(t, response) != "INTERNAL_ERROR" {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"request_id":"`) {
+		t.Fatalf("error body lacks the request ID: %s", response.Body.String())
+	}
 }

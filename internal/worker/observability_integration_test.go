@@ -22,6 +22,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // obsEnv is one isolated database with the real API, store observer, and
@@ -460,4 +461,33 @@ func TestStalledWorkersRaiseOldestReadyAgeIntegration(t *testing.T) {
 		}
 	}
 	t.Fatal("oldest ready age gauge missing")
+}
+
+// TestWorkflowFanInSpanLinksIntegration: a fan-in step's attempt is a child
+// of the dependency that released it and links to the other one.
+func TestWorkflowFanInSpanLinksIntegration(t *testing.T) {
+	exporter := telemetrytest.Setup(t)
+	env := newObsEnv(t, 1, 100*time.Millisecond)
+	id := env.submit(t, "/v1/workflows", `{"steps":[
+		{"name":"a","kind":"demo.echo","payload":{"message":"a"}},
+		{"name":"b","kind":"demo.echo","payload":{"message":"b"}},
+		{"name":"c","kind":"demo.echo","payload":{"message":"c"},"depends_on":["a","b"]}]}`)
+	env.runWorkerUntil(t, env.workflowIs(t, id, job.WorkflowSucceeded))
+	byStep := map[string]tracetest.SpanStub{}
+	for _, span := range spansNamed(exporter, "job.attempt") {
+		byStep[attr(span, "taskforge.workflow.step")] = span
+	}
+	a, b, c := byStep["a"].SpanContext.SpanID(), byStep["b"].SpanContext.SpanID(), byStep["c"]
+	var other trace.SpanID
+	switch c.Parent.SpanID() {
+	case a:
+		other = b
+	case b:
+		other = a
+	default:
+		t.Fatalf("fan-in attempt parent %s is neither dependency (a=%s b=%s)", c.Parent.SpanID(), a, b)
+	}
+	if len(c.Links) != 1 || c.Links[0].SpanContext.SpanID() != other {
+		t.Fatalf("fan-in links=%+v, want exactly the other dependency %s", c.Links, other)
+	}
 }

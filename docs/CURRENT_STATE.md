@@ -3,12 +3,13 @@
 ## Product
 
 TaskForge is an educational, production-like durable job platform written in
-Go. v0.7 adds connected tracing, bounded metrics, SLOs with tested burn-rate
-alerts, and dashboards on top of v0.6 workflow DAGs with saga compensation and the v0.5
+Go. v0.7 added connected tracing, bounded metrics, SLOs with tested burn-rate
+alerts, and dashboards, and v0.7.1 completes them (API-availability SLO,
+fan-in span links, workflow load generation, error-budget dashboard) on top of v0.6 workflow DAGs with saga compensation and the v0.5
 transactional outbox and NATS JetStream events, while PostgreSQL remains the
 durable coordination authority.
 
-## Current implemented state (v0.7)
+## Current implemented state (v0.7.1)
 
 - Commands: `taskforge-api`, `taskforge-worker`, `taskforge-migrate`, and
   `taskforge-relay`.
@@ -67,15 +68,19 @@ durable coordination authority.
 
 - Every job and workflow stores the trace context that caused it (migration
   7); worker attempts continue the trace as children, or as linked roots for
-  client-delayed jobs, and workflow steps chain causally (ADR 0013). Client
-  `traceparent` headers are links only.
+  client-delayed jobs, and workflow steps chain causally (ADR 0013). A fan-in
+  step also links to its other completed dependencies (migration 8). Client
+  `traceparent` headers are links only; health probes are not traced.
 - Prometheus metrics with bounded labels on a separate loopback listener per
   process; database gauges are cached snapshots; job outcomes are reported
   only after commit.
-- Start-latency (99 % within 5 s of readiness) and reliability (99.5 %, platform
-  failures only) SLOs with multi-window burn-rate, stalled-worker, and
-  missing-signal alerts, all `promtool`-tested; a provisioned Grafana
-  dashboard; Jaeger; `taskforge-loadgen` and a burn demo.
+- Start-latency (99 % within 5 s of readiness), reliability (99.5 %, platform
+  failures only), and API-availability (99.9 %, 5xx on matched routes) SLOs
+  with multi-window burn-rate, stalled-worker, and missing-signal alerts, all
+  `promtool`-tested; a provisioned Grafana dashboard with error budget
+  remaining; Jaeger; `taskforge-loadgen` (jobs and workflows) and a burn demo.
+- Handler panics are answered `500 INTERNAL_ERROR`, counted as 5xx, and logged
+  with a stack trace (`http_handler_panic`).
 - The API rejects unregistered kinds with `400 UNSUPPORTED_JOB_KIND`.
 
 ## Architecture decisions
@@ -106,8 +111,7 @@ Not yet implemented:
   branches, or resuming a workflow after redrive; events for schedule changes
 - Arbitrary commands, binaries, scripts, URLs, or user-provided executable code
 - Authentication, public-network exposure, multi-tenancy, or billing
-- Trace propagation through NATS events, the API-availability SLO,
-  Alertmanager routing, log shipping
+- Trace propagation through NATS events, Alertmanager routing, log shipping
 - gRPC, Kubernetes, or a web UI beyond Grafana
 - Claims of exactly-once execution or production readiness
 

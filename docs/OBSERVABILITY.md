@@ -1,4 +1,4 @@
-# TaskForge observability (v0.7)
+# TaskForge observability (v0.7.1)
 
 TaskForge exports traces over OTLP/HTTP (to Jaeger in Compose) and Prometheus
 metrics from every process. Telemetry never blocks work: with tracing off, a
@@ -34,7 +34,11 @@ appear in the same trace. Search by tag `taskforge.job.id=<id>` to find every
 attempt of one job, including linked roots of delayed jobs.
 
 A saga appears as a causal chain, because each step is dispatched inside the
-transaction of the attempt that released it:
+transaction of the attempt that released it. A step that waits for several
+dependencies (fan-in, like `ship` below) is a child of the dependency that
+released it and carries a **span link** to each other completed dependency
+(up to 32), stored in `jobs.trace_links` when it was dispatched (ADR 0013
+addendum):
 
 ```text
 POST /v1/workflows
@@ -42,7 +46,7 @@ POST /v1/workflows
    └─ job.attempt reserve
       ├─ job.attempt notify
       └─ job.attempt charge
-         └─ job.attempt ship        (fails, dead-lettered)
+         └─ job.attempt ship        (fails, dead-lettered; links to notify)
             └─ job.attempt charge/compensation   (refund)
                └─ job.attempt reserve/compensation (release)
 ```
@@ -51,12 +55,12 @@ POST /v1/workflows
 
 | Span | Process | Notes |
 | --- | --- | --- |
-| route pattern, e.g. `POST /v1/jobs` | API | server span, always a new root; `http.route`, `http.response.status_code`; unknown paths are `unmatched` |
+| route pattern, e.g. `POST /v1/jobs` | API | server span, always a new root; `http.route`, `http.response.status_code`; unknown paths are `unmatched`; a handler panic adds an `exception` event with a stack trace. `GET /healthz` and `GET /readyz` are counted but never traced |
 | `job.enqueue`, `workflow.submit` | API | producer; job or workflow ID, kind, queue, delayed |
 | `job.redrive`, `workflow.cancel` | API | internal |
-| `job.attempt` | worker | consumer; job ID, kind, queue, attempt, max attempts, workflow ID/step/role, outcome (`succeeded`, `failed`, `lease_lost`), error code; error status when the outcome could not be persisted; `workflow.dispatch` events for steps it released |
+| `job.attempt` | worker | consumer; job ID, kind, queue, attempt, max attempts, workflow ID/step/role, outcome (`succeeded`, `failed`, `lease_lost`), error code; error status when the outcome could not be persisted; `workflow.dispatch` events for steps it released; links to the other dependencies of a fan-in step |
 | `lease.recovery` | worker | only for recovery passes that found expired leases; `recovered`, `failed` |
-| `schedule.dispatch` | worker | one root per dispatched cron slot; the materialized job is its child |
+| `schedule.dispatch` | worker | one root per dispatched cron slot; the materialized job is its child; `taskforge.schedule.created` is false when the slot's job already existed |
 
 Span attributes never contain payloads, results, idempotency keys, execution
 keys, or credentials.

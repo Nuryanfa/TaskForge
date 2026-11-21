@@ -22,3 +22,6 @@ Thumbs.db
 /data/
 /tmp/
 coverage.out
+
+# Local agent tooling
+.superpowers/

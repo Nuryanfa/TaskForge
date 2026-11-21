@@ -69,3 +69,22 @@ Three further constraints shaped the decision:
   from the counters; the database state is still correct.
 - Sampling is parent-based from the stored context: a job sampled out at
   submission stays sampled out on every attempt.
+
+## Addendum (v0.7.1): fan-in span links
+
+A workflow step that waits for several dependencies is dispatched by the
+completion of the last one, and that completion's attempt stays its parent:
+the parent rule above is unchanged. The other dependencies are now recorded
+as span links instead of being lost.
+
+- When an action step succeeds, its attempt's traceparent is stored in
+  `workflow_steps.last_attempt_trace_parent` (migration 8), inside the same
+  completion transaction.
+- When a fan-in step is released, the stored contexts of its dependencies
+  other than the releasing one are copied, in `depends_on` order, into
+  `jobs.trace_links` (at most 32 well-formed traceparents, enforced by a
+  CHECK). Compensations get no links.
+- `StartAttempt` adds one span link per stored entry, on every attempt, so a
+  retry keeps the same links. Links are best effort: a dependency that ran
+  without a span context (tracing off, or before migration 8) is skipped, and
+  a malformed entry is ignored.

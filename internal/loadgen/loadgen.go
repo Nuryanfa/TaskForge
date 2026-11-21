@@ -1,4 +1,4 @@
-// Package loadgen submits a weighted mix of demo jobs at a fixed rate. It
+// Package loadgen submits a weighted mix of demo jobs and workflows at a fixed rate. It
 // drives the SLO burn demo (docs/SLO.md); it is a development tool, not part
 // of the platform.
 package loadgen
@@ -14,11 +14,33 @@ import (
 	"time"
 )
 
-// Entry is one kind of job in the mix with its relative weight.
+// Entry is one kind of submission in the mix with its relative weight: Body
+// is the complete JSON request body posted to Path (/v1/jobs or
+// /v1/workflows).
 type Entry struct {
-	Kind    string
-	Weight  int
-	Payload json.RawMessage
+	Name   string
+	Weight int
+	Path   string
+	Body   json.RawMessage
+}
+
+// Workflow bodies. "workflow" is a diamond (a, then b and c, then d) so the
+// fan-in step d exercises span links; "workflow:fail" is a saga whose second
+// step fails and compensates the first.
+const (
+	workflowOK = `{"steps":[` +
+		`{"name":"a","kind":"demo.echo","payload":{"message":"a"}},` +
+		`{"name":"b","kind":"demo.echo","payload":{"message":"b"},"depends_on":["a"]},` +
+		`{"name":"c","kind":"demo.echo","payload":{"message":"c"},"depends_on":["a"]},` +
+		`{"name":"d","kind":"demo.echo","payload":{"message":"d"},"depends_on":["b","c"]}]}`
+	workflowFail = `{"steps":[` +
+		`{"name":"reserve","kind":"demo.echo","payload":{"message":"reserve"},` +
+		`"compensation":{"kind":"demo.echo","payload":{"message":"release"}}},` +
+		`{"name":"ship","kind":"demo.fail","payload":{},"depends_on":["reserve"]}]}`
+)
+
+func jobEntry(kind, payload string) (string, json.RawMessage) {
+	return "/v1/jobs", json.RawMessage(fmt.Sprintf(`{"kind":%q,"payload":%s}`, kind, payload))
 }
 
 // Mix is a weighted list of entries.
@@ -45,7 +67,8 @@ func (m Mix) pick(value int) Entry {
 }
 
 // ParseMix parses "echo=60,sleep:8000=20,fail=10,flaky:2=10": echo, fail,
-// sleep:<ms> (0..60000), and flaky:<fail_attempts> (0..10), each =<weight>.
+// sleep:<ms> (0..60000), flaky:<fail_attempts> (0..10), workflow (alias
+// workflow:ok), and workflow:fail, each =<weight>.
 func ParseMix(spec string) (Mix, error) {
 	var mix Mix
 	for _, part := range strings.Split(spec, ",") {
@@ -55,26 +78,35 @@ func ParseMix(spec string) (Mix, error) {
 			return nil, fmt.Errorf("mix entry %q must be <kind>=<positive weight>", part)
 		}
 		kind, argument, hasArgument := strings.Cut(name, ":")
-		entry := Entry{Weight: weight}
+		entry := Entry{Name: name, Weight: weight}
 		switch kind {
 		case "echo":
-			entry.Kind, entry.Payload = "demo.echo", json.RawMessage(`{"message":"loadgen"}`)
+			entry.Path, entry.Body = jobEntry("demo.echo", `{"message":"loadgen"}`)
 		case "fail":
-			entry.Kind, entry.Payload = "demo.fail", json.RawMessage(`{}`)
+			entry.Path, entry.Body = jobEntry("demo.fail", `{}`)
 		case "sleep":
 			ms, err := boundedArgument(argument, hasArgument, 1000, 60000)
 			if err != nil {
 				return nil, fmt.Errorf("mix entry %q: sleep milliseconds %w", part, err)
 			}
-			entry.Kind, entry.Payload = "demo.sleep", json.RawMessage(fmt.Sprintf(`{"ms":%d}`, ms))
+			entry.Path, entry.Body = jobEntry("demo.sleep", fmt.Sprintf(`{"ms":%d}`, ms))
 		case "flaky":
 			failures, err := boundedArgument(argument, hasArgument, 1, 10)
 			if err != nil {
 				return nil, fmt.Errorf("mix entry %q: flaky failures %w", part, err)
 			}
-			entry.Kind, entry.Payload = "demo.flaky", json.RawMessage(fmt.Sprintf(`{"fail_attempts":%d}`, failures))
+			entry.Path, entry.Body = jobEntry("demo.flaky", fmt.Sprintf(`{"fail_attempts":%d}`, failures))
+		case "workflow":
+			switch {
+			case !hasArgument || argument == "ok":
+				entry.Path, entry.Body = "/v1/workflows", json.RawMessage(workflowOK)
+			case argument == "fail":
+				entry.Path, entry.Body = "/v1/workflows", json.RawMessage(workflowFail)
+			default:
+				return nil, fmt.Errorf("mix entry %q: unknown workflow %q (use workflow, workflow:ok, workflow:fail)", part, name)
+			}
 		default:
-			return nil, fmt.Errorf("mix entry %q: unknown kind (use echo, fail, sleep:<ms>, flaky:<n>)", part)
+			return nil, fmt.Errorf("mix entry %q: unknown kind (use echo, fail, sleep:<ms>, flaky:<n>, workflow, workflow:fail)", part)
 		}
 		mix = append(mix, entry)
 	}
@@ -98,7 +130,7 @@ type Stats struct {
 	Failed    int
 }
 
-// Run submits one job per 1/rate seconds until ctx ends. pick returns a value
+// Run submits one entry per 1/rate seconds until ctx ends. pick returns a value
 // in [0, mix.TotalWeight()) choosing the entry for each submission.
 func Run(ctx context.Context, client *http.Client, baseURL string, rate float64, mix Mix, pick func() int) (Stats, error) {
 	if rate <= 0 || len(mix) == 0 {
@@ -106,7 +138,7 @@ func Run(ctx context.Context, client *http.Client, baseURL string, rate float64,
 	}
 	ticker := time.NewTicker(time.Duration(float64(time.Second) / rate))
 	defer ticker.Stop()
-	endpoint := strings.TrimRight(baseURL, "/") + "/v1/jobs"
+	base := strings.TrimRight(baseURL, "/")
 	var stats Stats
 	for {
 		select {
@@ -115,8 +147,7 @@ func Run(ctx context.Context, client *http.Client, baseURL string, rate float64,
 		case <-ticker.C:
 		}
 		entry := mix.pick(pick())
-		body, _ := json.Marshal(map[string]any{"kind": entry.Kind, "payload": entry.Payload})
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+entry.Path, bytes.NewReader(entry.Body))
 		if err != nil {
 			return stats, err
 		}

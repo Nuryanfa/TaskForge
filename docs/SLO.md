@@ -1,4 +1,4 @@
-# TaskForge service level objectives (v0.7)
+# TaskForge service level objectives (v0.7.1)
 
 The SLIs below were defined before any dashboard existed. Every latency
 sample is computed from PostgreSQL timestamps, so host clock skew cannot
@@ -13,6 +13,7 @@ tests: [`deployments/prometheus/tests/slo_test.yml`](../deployments/prometheus/t
 | --- | --- | --- | --- | --- |
 | **Start latency** | a claimed job whose start delay is ≤ 5 s | every claimed job | 99 % | 28 days |
 | **Reliability** | a terminal outcome that is not a dead letter caused by the platform | every `succeeded` or `dead_lettered` outcome (`canceled` excluded) | 99.5 % | 28 days |
+| **API availability** | a request answered without a 5xx | every request that matched a route, except `GET /healthz` and `GET /readyz` | 99.9 % | 28 days |
 
 **Start delay** is `started_at − available_at` from the claim statement. It is
 measured from when the job became **ready**, never from submission, so a job
@@ -26,8 +27,12 @@ does not burn TaskForge's budget. Because the API rejects unregistered kinds
 at submission (`400 UNSUPPORTED_JOB_KIND`), a run-time `UNKNOWN_JOB_KIND` can
 only mean a worker is missing a handler the API accepts: a deployment error.
 
-The API-availability SLO is deferred to v0.7.1; the HTTP metrics it needs
-already exist.
+**API availability** comes from `taskforge_http_requests_total{route,code}`.
+Client errors (4xx: validation, not found, conflicts) are the client's
+budget, not the platform's. Requests that matched no route (`unmatched`) and
+liveness/readiness probes are not valid events, so probe traffic cannot dilute
+the ratio. A handler panic is answered `500 INTERNAL_ERROR` and counted as a
+5xx, so crashes burn the budget instead of disappearing.
 
 ## Alert policy
 
@@ -36,6 +41,7 @@ already exist.
 | `TaskForgeStartLatencyFastBurn` | bad ratio > 14.4 × budget over 1 h **and** 5 m | page |
 | `TaskForgeStartLatencySlowBurn` | bad ratio > 6 × budget over 6 h **and** 30 m | ticket |
 | `TaskForgeReliabilityFastBurn` / `SlowBurn` | same windows, 0.5 % budget, platform dead letters only | page / ticket |
+| `TaskForgeAPIAvailabilityFastBurn` / `SlowBurn` | same windows, 0.1 % budget, 5xx on matched routes only | page / ticket |
 | `TaskForgeJobsNotStarting` | oldest ready job older than 60 s for 5 m | page |
 | `TaskForgeDBCollectorAbsent` | `taskforge_jobs` missing for 5 m | page |
 | `TaskForgeTargetDown` | a TaskForge scrape target is down for 2 m | page |
@@ -50,12 +56,21 @@ already exist.
   refreshes in a row) and `TaskForgeDBCollectorAbsent` fires.
 
 Every alert has a `promtool` case where it fires and one where it stays
-silent. The silent cases cover: burn within budget (both SLOs), traffic below
-the minimum volume (both SLOs), a slow burn that must not page (both SLOs), a
-five-minute reliability spike that the 1h window does not confirm, handler
-failures (never platform budget), ready jobs younger than 60 s, and every
-target up with database gauges present. The thresholds and volume gates were
-mutation-checked: loosening any of them makes the suite fail.
+silent. The silent cases cover:
+
+- burn within budget, traffic below the minimum volume, and a slow burn that
+  must not page (all three SLOs);
+- five-minute reliability and API spikes that the 1h window does not confirm;
+- handler failures (never platform budget);
+- a flood of 4xx responses and requests to unmatched routes (never API budget);
+- ready jobs younger than 60 s, and every target up with database gauges
+  present.
+
+A firing case also proves that 1000 probe requests per minute do not dilute
+the API ratio. The three 28-day ratios behind the dashboard's error-budget
+panel have their own `promql_expr_test` cases. Every threshold, volume gate,
+route filter, and 28-day rule was mutation-checked: loosening or breaking any
+of them makes the suite fail.
 
 ## Burn the budget (portfolio demo)
 

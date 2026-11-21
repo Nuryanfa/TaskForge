@@ -39,7 +39,7 @@ func main() {
 
 	process, err := telemetry.StartProcess(ctx, cfg, "taskforge-api", "127.0.0.1:9101", logger)
 	if err != nil {
-		logger.Error("metrics_listen_failed")
+		logger.Error("telemetry_start_failed", "reason", telemetry.StartFailureReason(err))
 		os.Exit(1)
 	}
 	defer func() {
@@ -59,7 +59,7 @@ func main() {
 			PayloadMaxBytes: cfg.JobPayloadMaxBytes, ReadinessTimeout: cfg.DatabaseQueryTimeout,
 			PageSize: cfg.DeadLetterPageSize, WorkflowMaxSteps: cfg.WorkflowMaxSteps,
 			WorkflowMaxBytes: cfg.WorkflowMaxBytes, WorkflowPageSize: cfg.WorkflowPageSize,
-			Metrics: process.Metrics,
+			Metrics: process.Metrics, Logger: logger,
 		}),
 		ReadTimeout: cfg.ReadTimeout, ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout: cfg.WriteTimeout, IdleTimeout: cfg.IdleTimeout,

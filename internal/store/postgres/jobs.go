@@ -23,7 +23,7 @@ idempotency_key, available_at, attempt_count, result, last_error_code,
 created_at, updated_at, started_at, completed_at, lease_owner, lease_expires_at,
 fencing_token, execution_idempotency_key, max_attempts, retry_initial_backoff_ms,
 retry_max_backoff_ms, retry_jitter_percent, dead_lettered_at, schedule_id, scheduled_for,
-workflow_id, workflow_step_id, workflow_role, trace_parent, trace_link`
+workflow_id, workflow_step_id, workflow_role, trace_parent, trace_link, trace_links`
 
 var errorCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
@@ -441,7 +441,7 @@ func scanJob(row rowScanner) (job.Job, error) {
 		&found.LeaseExpiresAt, &found.FencingToken, &found.ExecutionKey, &found.MaxAttempts,
 		&initialMS, &maxMS, &found.JitterPercent, &found.DeadLetteredAt, &found.ScheduleID, &found.ScheduledFor,
 		&found.WorkflowID, &found.WorkflowStepID, &found.WorkflowRole,
-		&found.TraceParent, &found.TraceLink)
+		&found.TraceParent, &found.TraceLink, &found.TraceLinks)
 	found.InitialBackoff = time.Duration(initialMS) * time.Millisecond
 	found.MaxBackoff = time.Duration(maxMS) * time.Millisecond
 	return found, err

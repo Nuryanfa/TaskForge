@@ -1,9 +1,9 @@
-# TaskForge data model (schema v7)
+# TaskForge data model (schema v8)
 
 PostgreSQL is the only durable store. The schema is defined by the embedded
 migrations in [`db/migrations`](../db/migrations) and applied by
 `taskforge-migrate` using goose. This document describes the schema after
-migration `000007`.
+migration `000008`.
 
 ## Entity relationships
 
@@ -259,6 +259,7 @@ rows with `published_at IS NULL` are never deleted.
 | 5 | `000005_add_outbox.sql` | v0.5 | `outbox_events` table, job event trigger function and triggers, unpublished/published indexes. Existing jobs are not backfilled. |
 | 6 | `000006_add_workflows.sql` | v0.6 | `workflows`, `workflow_steps`, job workflow link columns and indexes; job event snapshot gains `workflow_id`. Existing jobs stay standalone. |
 | 7 | `000007_add_trace_context.sql` | v0.7 | `jobs.trace_parent`, `jobs.trace_link`, `workflows.trace_parent` (W3C traceparent, checked format; ADR 0013). Existing rows keep NULL / false. |
+| 8 | `000008_add_fan_in_trace_links.sql` | v0.7.1 | `workflow_steps.last_attempt_trace_parent` (the succeeded attempt's context) and `jobs.trace_links TEXT[] NOT NULL DEFAULT '{}'` (fan-in span links: at most 32 well-formed traceparents, one per element, no NULLs). Existing rows keep NULL / empty. |
 
 ### Migration rules
 
@@ -269,6 +270,8 @@ rows with `published_at IS NULL` are never deleted.
   migration (see `000002`).
 - Upgrade paths are integration-tested (`TestV01RunningJobUpgradeIntegration`,
   `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`,
-  `TestV04SchemaUpgradeIntegration`).
+  `TestV04SchemaUpgradeIntegration`, `TestV05SchemaUpgradeIntegration`,
+  `TestV06SchemaUpgradeIntegration`, `TestV07SchemaUpgradeIntegration`; the
+  last also rolls migration 8 back and forward again).
 - Add a migration file and update this document and `CURRENT_STATE.md` in the
   same change.

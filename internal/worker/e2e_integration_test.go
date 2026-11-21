@@ -199,7 +199,7 @@ func performJSON(handler http.Handler, method, path, body string) *httptest.Resp
 // package run this waits behind the store suite's per-test migrations.
 func migrateIsolated(t *testing.T, databaseURL string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if err := migrations.Run(ctx, databaseURL); err != nil {
 		t.Fatal("apply migrations")

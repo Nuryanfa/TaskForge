@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
+	"github.com/Nuryanfa/TaskForge/internal/tracectx"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -114,10 +115,14 @@ func (s *Store) onJobTerminal(ctx context.Context, tx pgx.Tx, item terminalJob) 
 			stepStatus = job.StepSucceeded
 			compensation = job.CompensationNotDefined
 		}
+		// A succeeded step keeps its attempt's context (the completion runs in
+		// the attempt span) for fan-in links on the steps it releases.
 		err := tx.QueryRow(ctx, `UPDATE workflow_steps SET status=$2,
 			compensation_status = CASE WHEN $2 = 'succeeded' AND compensation_kind IS NOT NULL
-				THEN 'waiting' ELSE $3 END
-			WHERE id=$1 AND status='dispatched' RETURNING name`, *item.StepID, stepStatus, compensation).Scan(&name)
+				THEN 'waiting' ELSE $3 END,
+			last_attempt_trace_parent = CASE WHEN $2 = 'succeeded' THEN $4 ELSE last_attempt_trace_parent END
+			WHERE id=$1 AND status='dispatched' RETURNING name`, *item.StepID, stepStatus, compensation,
+			tracectx.FromContext(ctx)).Scan(&name)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("record step outcome for job %s: %w", item.ID, ErrStateConflict)
 		}
@@ -184,11 +189,40 @@ func dispatchReadyDependents(ctx context.Context, tx pgx.Tx, wf workflowState, n
 	}
 	sort.Slice(ready, func(i, j int) bool { return ready[i].position < ready[j].position })
 	for _, item := range ready {
-		if err := dispatchStepJob(ctx, tx, wf.id, wf.policy, item, job.RoleAction); err != nil {
+		links, err := fanInLinks(ctx, tx, wf.id, item.dependsOn, name)
+		if err != nil {
+			return err
+		}
+		if err := dispatchStepJob(ctx, tx, wf.id, wf.policy, item, job.RoleAction, links); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// maxTraceLinks matches the jobs.trace_links CHECK bound (migration 8).
+const maxTraceLinks = 32
+
+// fanInLinks returns the stored attempt contexts of a step's dependencies
+// other than the one whose completion is dispatching it (that one is the
+// parent), in depends_on order. Dependencies without a context are skipped,
+// and links beyond maxTraceLinks are dropped: links are best effort and must
+// never make the completing job's transaction fail.
+func fanInLinks(ctx context.Context, tx pgx.Tx, workflowID string, dependsOn []string, trigger string) ([]string, error) {
+	if len(dependsOn) < 2 {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT last_attempt_trace_parent FROM workflow_steps
+		WHERE workflow_id=$1 AND name = ANY($2) AND name <> $3 AND last_attempt_trace_parent IS NOT NULL
+		ORDER BY array_position($2, name) LIMIT $4`, workflowID, dependsOn, trigger, maxTraceLinks)
+	if err != nil {
+		return nil, classify("load fan-in contexts", err)
+	}
+	links, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, classify("read fan-in contexts", err)
+	}
+	return links, nil
 }
 
 // abortWorkflow moves a running workflow to compensating: pending steps are
@@ -276,7 +310,7 @@ func settleWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) error {
 	if wf.status == job.WorkflowCompensating {
 		for _, name := range job.ReadyCompensations(states) {
 			index := byName[name]
-			if err := dispatchStepJob(ctx, tx, wf.id, wf.policy, steps[index], job.RoleCompensation); err != nil {
+			if err := dispatchStepJob(ctx, tx, wf.id, wf.policy, steps[index], job.RoleCompensation, nil); err != nil {
 				return err
 			}
 			states[index].Compensation = job.CompensationDispatched

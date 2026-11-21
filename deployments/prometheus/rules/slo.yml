@@ -46,6 +46,36 @@ groups:
       - record: taskforge:reliability_bad:ratio_rate6h
         expr: (sum(rate(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[6h])) or vector(0)) / taskforge:reliability_valid:rate6h
 
+      # API availability: a request is valid when it matched a route and is not
+      # a liveness/readiness probe; it is bad when it answered 5xx. Client
+      # errors (4xx) are the client's budget, not the platform's.
+      - record: taskforge:api_availability_valid:rate5m
+        expr: sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz"}[5m]))
+      - record: taskforge:api_availability_valid:rate30m
+        expr: sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz"}[30m]))
+      - record: taskforge:api_availability_valid:rate1h
+        expr: sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz"}[1h]))
+      - record: taskforge:api_availability_valid:rate6h
+        expr: sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz"}[6h]))
+      - record: taskforge:api_availability_valid:rate28d
+        expr: sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz"}[28d]))
+      - record: taskforge:api_availability_bad:ratio_rate5m
+        expr: (sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz",code=~"5.."}[5m])) or vector(0)) / taskforge:api_availability_valid:rate5m
+      - record: taskforge:api_availability_bad:ratio_rate30m
+        expr: (sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz",code=~"5.."}[30m])) or vector(0)) / taskforge:api_availability_valid:rate30m
+      - record: taskforge:api_availability_bad:ratio_rate1h
+        expr: (sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz",code=~"5.."}[1h])) or vector(0)) / taskforge:api_availability_valid:rate1h
+      - record: taskforge:api_availability_bad:ratio_rate6h
+        expr: (sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz",code=~"5.."}[6h])) or vector(0)) / taskforge:api_availability_valid:rate6h
+      - record: taskforge:api_availability_bad:ratio_rate28d
+        expr: (sum(rate(taskforge_http_requests_total{route!="unmatched",route!~"GET /healthz|GET /readyz",code=~"5.."}[28d])) or vector(0)) / taskforge:api_availability_valid:rate28d
+
+      # 28-day ratios feed the dashboard's error-budget-remaining panel.
+      - record: taskforge:start_latency_bad:ratio_rate28d
+        expr: 1 - sum(rate(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[28d])) / sum(rate(taskforge_job_start_delay_seconds_count[28d]))
+      - record: taskforge:reliability_bad:ratio_rate28d
+        expr: (sum(rate(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[28d])) or vector(0)) / sum(rate(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[28d]))
+
   - name: taskforge-slo-alerts
     rules:
       - alert: TaskForgeStartLatencyFastBurn
@@ -92,6 +122,29 @@ groups:
           slo: reliability
         annotations:
           summary: Jobs are being dead-lettered by platform failures, burning the error budget steadily.
+
+      - alert: TaskForgeAPIAvailabilityFastBurn
+        expr: |
+          taskforge:api_availability_bad:ratio_rate1h > (14.4 * 0.001)
+          and taskforge:api_availability_bad:ratio_rate5m > (14.4 * 0.001)
+          and on() (taskforge:api_availability_valid:rate1h * 3600) >= on() taskforge:slo_min_events_per_hour
+        for: 2m
+        labels:
+          severity: page
+          slo: api_availability
+        annotations:
+          summary: API requests are failing with 5xx, burning the availability error budget fast.
+      - alert: TaskForgeAPIAvailabilitySlowBurn
+        expr: |
+          taskforge:api_availability_bad:ratio_rate6h > (6 * 0.001)
+          and taskforge:api_availability_bad:ratio_rate30m > (6 * 0.001)
+          and on() (taskforge:api_availability_valid:rate1h * 3600) >= on() taskforge:slo_min_events_per_hour
+        for: 15m
+        labels:
+          severity: ticket
+          slo: api_availability
+        annotations:
+          summary: API requests are failing with 5xx, burning the availability error budget steadily.
 
       # Start latency has no samples while nothing is claimed; this alert
       # covers that blind spot from the database side.

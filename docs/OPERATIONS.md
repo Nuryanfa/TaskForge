@@ -1,6 +1,6 @@
 # TaskForge operations guide
 
-Operational procedures for running TaskForge v0.5 in a development or trusted
+Operational procedures for running TaskForge v0.7.1 in a development or trusted
 lab environment. TaskForge is not production ready and has no authentication.
 
 ## Deployment order
@@ -45,8 +45,10 @@ Compose performs these steps automatically with `docker compose up --build`.
 | `GET /readyz` | PostgreSQL ping succeeded within the query timeout. | Readiness / load-balancer membership. |
 | `/taskforge-api healthcheck` | Container-internal liveness probe against `127.0.0.1:8080/healthz`. | Docker healthcheck. |
 
-The worker and relay have no HTTP endpoint; monitor them through logs, job
-state, and the outbox backlog. NATS exposes `/healthz?js-enabled-only=true`
+The worker and relay serve no API. Each exposes only `GET /metrics` on its own
+listener (`TASKFORGE_METRICS_ADDR`; worker `:9102`, relay `:9103` in Compose,
+the API `:9101`); monitor them through those metrics, logs, job state, and the
+outbox backlog. NATS exposes `/healthz?js-enabled-only=true`
 on its monitoring port (8222) for container health checks.
 
 ## Log events
@@ -77,7 +79,9 @@ results, keys, and DSNs are never logged.
 | `worker_heartbeat_failed` | error | W | Lease renewal failed for a reason other than lost ownership; execution was cancelled. |
 | `worker_persist_outcome_failed` | error | W | Could not write success/failure; job will be recovered after lease expiry. |
 | `worker_recovery_failed` | error | W | Recovery transaction failed as a whole (usually database availability). |
-| `metrics_started` / `metrics_listen_failed` / `metrics_server_failed` | info / error | A W R | Metrics listener lifecycle; a listen failure stops startup. |
+| `metrics_started` / `metrics_server_failed` | info / error | A W R | Metrics listener lifecycle. |
+| `http_handler_panic` | error | A | A handler panicked; the request was answered `500 INTERNAL_ERROR` (or aborted if the response had started) and counted as a 5xx. Carries `route`, `trace_id`, and `stack`, never the panic value. |
+| `telemetry_start_failed` | error | A W R | Telemetry could not start and the process exits; `reason` is `tracing` (invalid trace endpoint) or `metrics_listen` (metrics address in use or invalid). |
 | `metrics_snapshot_failed` | error | A | The database snapshot for gauges failed; the gauges disappear until the next success. |
 | `otel_export_failed` | warn | A W R | Span export failed (logged at most once a minute; counted in `taskforge_otel_export_failures_total`). |
 | `worker_recovery_partial` | error | W | Some jobs in a recovery batch were rolled back; `failed_job_ids` lists them and the rest of the batch was recovered. |
@@ -116,7 +120,7 @@ Definitions: [SLO.md](SLO.md).
 | `TaskForgeReliabilityFastBurn` / `SlowBurn` | Outcomes by class: which platform code? `LEASE_EXPIRED` means workers crash, are killed, or lose the database (check `worker_jobs_recovered`, restarts, lease vs. heartbeat); `UNKNOWN_JOB_KIND` means workers run an older build than the API. |
 | `TaskForgeJobsNotStarting` | No worker is claiming: check worker processes and logs (`worker_claim_failed`), database connectivity, and whether ready jobs are in a queue no worker serves. |
 | `TaskForgeDBCollectorAbsent` | The API process or its database connection is down (`metrics_snapshot_failed` in API logs); `/readyz` will also fail. |
-| `TaskForgeTargetDown` | The named process is down or its metrics listener is unreachable; `metrics_listen_failed` at startup means the address is in use. |
+| `TaskForgeTargetDown` | The named process is down or its metrics listener is unreachable; `telemetry_start_failed` with `reason=metrics_listen` at startup means the address is in use. |
 
 ## Runbooks
 

@@ -18,9 +18,9 @@ import (
 
 func main() {
 	baseURL := flag.String("url", "http://127.0.0.1:8080", "TaskForge API base URL")
-	rate := flag.Float64("rate", 2, "jobs submitted per second")
+	rate := flag.Float64("rate", 2, "submissions (jobs or workflows) per second")
 	duration := flag.Duration("duration", time.Minute, "how long to submit")
-	mixSpec := flag.String("mix", "echo=70,sleep:200=20,fail=10", "weighted mix: echo, fail, sleep:<ms>, flaky:<n>")
+	mixSpec := flag.String("mix", "echo=70,sleep:200=20,fail=10", "weighted mix: echo, fail, sleep:<ms>, flaky:<n>, workflow, workflow:fail")
 	seed := flag.Uint64("seed", uint64(time.Now().UnixNano()), "random seed for the mix")
 	flag.Parse()
 

@@ -224,3 +224,68 @@ func TestShutdownBoundedWithManyQueuedBatches(t *testing.T) {
 		t.Fatalf("flushing 4 batches to a hanging collector took %s; the export timeout is 300ms", elapsed)
 	}
 }
+
+// TestStartAttemptIncludesFanInTraceLinks: stored fan-in contexts become span
+// links next to the parent; malformed entries are skipped; a retry carries
+// the same links because they live on the job.
+func TestStartAttemptIncludesFanInTraceLinks(t *testing.T) {
+	const sibling = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	exporter := telemetrytest.Setup(t)
+	parent, _ := tracectx.SpanContext(storedParent)
+	linked, _ := tracectx.SpanContext(sibling)
+	for _, attempt := range []int{1, 2} {
+		exporter.Reset()
+		claimed := claimedJob(stored(), false)
+		claimed.Job.TraceLinks = []string{sibling, "not-a-traceparent"}
+		claimed.Execution.Attempt = attempt
+		_, span := StartAttempt(context.Background(), claimed)
+		span.End()
+		spans := exporter.GetSpans()
+		onlySpan(t, len(spans))
+		got := spans[0]
+		if got.Parent.SpanID() != parent.SpanID() {
+			t.Fatalf("attempt %d parent=%s, want %s", attempt, got.Parent.SpanID(), parent.SpanID())
+		}
+		if len(got.Links) != 1 || got.Links[0].SpanContext.SpanID() != linked.SpanID() {
+			t.Fatalf("attempt %d links=%+v, want exactly the sibling", attempt, got.Links)
+		}
+	}
+}
+
+// TestStartAttemptFanInLinksInEveryParentCase: links are added whether the
+// attempt is a child, a linked root, or a new root; never while tracing is off.
+func TestStartAttemptFanInLinksInEveryParentCase(t *testing.T) {
+	const sibling = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	exporter := telemetrytest.Setup(t)
+	linked, _ := tracectx.SpanContext(sibling)
+	for name, claimed := range map[string]job.Claimed{
+		"linked root": claimedJob(stored(), true),
+		"new root":    claimedJob(nil, false),
+	} {
+		exporter.Reset()
+		claimed.Job.TraceLinks = []string{sibling}
+		_, span := StartAttempt(context.Background(), claimed)
+		span.End()
+		spans := exporter.GetSpans()
+		onlySpan(t, len(spans))
+		found := false
+		for _, link := range spans[0].Links {
+			found = found || link.SpanContext.SpanID() == linked.SpanID()
+		}
+		if !found {
+			t.Fatalf("%s: links=%+v, want the fan-in sibling", name, spans[0].Links)
+		}
+	}
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+	if _, err := SetupTracing(context.Background(), TracingConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	claimed := claimedJob(stored(), false)
+	claimed.Job.TraceLinks = []string{sibling}
+	ctx, span := StartAttempt(context.Background(), claimed)
+	span.End()
+	if trace.SpanFromContext(ctx).SpanContext().IsValid() {
+		t.Fatal("tracing disabled but the attempt carried a span context")
+	}
+}

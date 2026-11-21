@@ -160,10 +160,19 @@ func StartAttempt(ctx context.Context, claimed job.Claimed) (context.Context, tr
 	if claimed.Job.TraceParent != nil {
 		parent, ok = tracectx.SpanContext(*claimed.Job.TraceParent)
 	}
-	if _, disabled := otel.GetTracerProvider().(noop.TracerProvider); disabled {
+	if disabledTracing() {
 		// With tracing off a no-op span would carry the stored parent forward
 		// and the store would copy it onto dispatched jobs; stay context-free.
 		ok = false
+	}
+	if !disabledTracing() {
+		// Fan-in: the other completed dependencies, stored at dispatch. Best
+		// effort; entries that do not parse are skipped.
+		for _, encoded := range claimed.Job.TraceLinks {
+			if linked, valid := tracectx.SpanContext(encoded); valid {
+				options = append(options, trace.WithLinks(trace.Link{SpanContext: linked}))
+			}
+		}
 	}
 	switch {
 	case ok && !claimed.Job.TraceLink:
@@ -184,4 +193,9 @@ func TraceID(ctx context.Context) string {
 		return ""
 	}
 	return strings.ToLower(spanContext.TraceID().String())
+}
+
+func disabledTracing() bool {
+	_, disabled := otel.GetTracerProvider().(noop.TracerProvider)
+	return disabled
 }

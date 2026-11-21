@@ -1,6 +1,6 @@
 # TaskForge
 
-TaskForge v0.6 is a durable PostgreSQL-backed background job platform written
+TaskForge v0.7.1 is a durable PostgreSQL-backed background job platform written
 in Go. It provides bounded leased execution, retry scheduling with deterministic
 jitter, stable execution idempotency keys, a PostgreSQL dead-letter queue,
 client-controlled delayed and recurring cron scheduling, job lifecycle events
@@ -212,8 +212,8 @@ On graceful shutdown the worker stops claiming and recovering, continues
 heartbeats while active handlers receive a bounded drain window, then cancels
 remaining local work and records a retryable `SHUTDOWN_TIMEOUT` failure. A hard
 crash cannot drain; recovery begins only after
-the lease expires. The built-in registry still supports only bounded
-`demo.echo` and never executes arbitrary user code.
+the lease expires. The built-in registry supports only the bounded demo handlers `demo.echo`,
+`demo.fail`, `demo.flaky`, and `demo.sleep`, and never executes arbitrary user code.
 
 Typed failures distinguish retryable conditions (including execution timeout
 and expired leases) from permanent failures such as invalid payloads or unknown
@@ -290,7 +290,8 @@ does not expose them. See [SECURITY.md](SECURITY.md).
 | v0.4 | Delayed and recurring scheduling | Implemented |
 | v0.5 | Transactional outbox and NATS JetStream | Implemented |
 | v0.6 | Workflow DAGs and saga compensation | Implemented |
-| v0.7 | Metrics, tracing, dashboards, and SLOs | Implemented (v0.7.0; API-availability SLO deferred to v0.7.1) |
+| v0.7 | Metrics, tracing, dashboards, and SLOs | Implemented |
+| v0.7.1 | API-availability SLO, fan-in span links, workflow load generation, dashboard error budgets | Implemented |
 | v0.8 | High availability, Kubernetes, load, and chaos testing | Planned |
 
 ## Documentation
@@ -307,4 +308,4 @@ Start at the [documentation index](docs/README.md). Key documents:
 
 ## License
 
-No license has been selected yet. Until one is added, all rights are reserved.
+TaskForge is released under the [MIT License](LICENSE).

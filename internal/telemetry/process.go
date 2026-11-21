@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,13 @@ import (
 	"github.com/Nuryanfa/TaskForge/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+)
+
+// StartProcess failures wrap one of these, so a command can log which part of
+// telemetry failed without logging addresses or endpoints.
+var (
+	ErrTracingSetup  = errors.New("tracing setup failed")
+	ErrMetricsListen = errors.New("metrics listener failed")
 )
 
 // Process bundles one command's telemetry: a dedicated registry with Go and
@@ -32,13 +40,13 @@ func StartProcess(ctx context.Context, cfg config.Config, service, defaultMetric
 		ExportTimeout: cfg.OTelExportTimeout, ServiceName: service, Logger: logger,
 	}, metrics.ExportFailures())
 	if err != nil {
-		return nil, fmt.Errorf("set up tracing: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrTracingSetup, err)
 	}
 	if addr := cfg.MetricsAddr(defaultMetricsAddr); addr != "" {
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
 			_ = shutdown(context.Background())
-			return nil, fmt.Errorf("listen for metrics: %w", err)
+			return nil, fmt.Errorf("%w: %w", ErrMetricsListen, err)
 		}
 		go func() {
 			if err := serveMetricsOn(ctx, listener, registry); err != nil {
@@ -52,3 +60,16 @@ func StartProcess(ctx context.Context, cfg config.Config, service, defaultMetric
 
 // Shutdown flushes pending spans within ctx's deadline.
 func (p *Process) Shutdown(ctx context.Context) error { return p.shutdown(ctx) }
+
+// StartFailureReason names the part of telemetry a StartProcess error came
+// from ("tracing" or "metrics_listen") for the telemetry_start_failed log.
+func StartFailureReason(err error) string {
+	switch {
+	case errors.Is(err, ErrTracingSetup):
+		return "tracing"
+	case errors.Is(err, ErrMetricsListen):
+		return "metrics_listen"
+	default:
+		return "unknown"
+	}
+}

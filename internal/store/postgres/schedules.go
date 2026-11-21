@@ -222,17 +222,19 @@ func (s *Store) DispatchDueSchedules(ctx context.Context, batchSize int) (int, e
 	for _, entry := range selected {
 		item := entry.schedule
 		// One root span per dispatched slot: the materialized job is its child,
-		// so a busy tick never produces one span with unbounded children.
+		// so a busy tick never produces one span with unbounded children. The
+		// span ends after the insert so it can record whether a job was created.
 		slotCtx, slotSpan := otel.Tracer(tracectx.TracerName).Start(queryCtx, "schedule.dispatch", trace.WithNewRoot(),
 			trace.WithAttributes(attribute.String("taskforge.schedule.id", item.ID),
 				attribute.String("taskforge.schedule.scheduled_for", item.NextRunAt.UTC().Format(time.RFC3339))))
-		slotSpan.End()
 		cron, _, err := job.ParseCron(item.CronExpr)
 		if err != nil {
+			slotSpan.End()
 			return 0, fmt.Errorf("parse schedule cron %s: %w", item.ID, err)
 		}
 		loc, _, err := job.ValidateTimezone(item.Timezone)
 		if err != nil {
+			slotSpan.End()
 			return 0, fmt.Errorf("validate schedule timezone %s: %w", item.ID, err)
 		}
 		slot := item.NextRunAt.UTC()
@@ -242,6 +244,7 @@ func (s *Store) DispatchDueSchedules(ctx context.Context, batchSize int) (int, e
 		}
 		nextRunAt, err := cron.Next(reference, loc)
 		if err != nil {
+			slotSpan.End()
 			return 0, fmt.Errorf("advance schedule %s: %w", item.ID, err)
 		}
 
@@ -259,6 +262,8 @@ func (s *Store) DispatchDueSchedules(ctx context.Context, batchSize int) (int, e
 			uuid.NewString(), s.retryPolicy.maxAttempts, s.retryPolicy.initialBackoff.Milliseconds(),
 			s.retryPolicy.maxBackoff.Milliseconds(), s.retryPolicy.jitterPercent, item.ID, slot,
 			tracectx.FromContext(slotCtx)).Scan(&createdID)
+		slotSpan.SetAttributes(attribute.Bool("taskforge.schedule.created", err == nil))
+		slotSpan.End()
 		if err == nil {
 			insertedID = &createdID
 			dispatched++

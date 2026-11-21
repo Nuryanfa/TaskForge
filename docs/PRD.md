@@ -116,8 +116,8 @@ integrations need idempotency keys or downstream fencing for their own effects.
 
 v0.7 excludes exactly-once event delivery, dispatching jobs through NATS,
 data flow or conditional branches between workflow steps, workflow-level
-events, trace propagation through NATS, the API-availability SLO,
-authentication or multitenancy, and Kubernetes.
+events, trace propagation through NATS, authentication or multitenancy, and
+Kubernetes. (The API-availability SLO it deferred was added in v0.7.1.)
 Workflow steps and compensations are at least once; compensations must be
 idempotent.
 
@@ -174,4 +174,5 @@ idempotent.
 | v0.5 | Transactional outbox and NATS JetStream (implemented) |
 | v0.6 | Workflow DAGs and saga compensation (implemented) |
 | v0.7 | Metrics, tracing, dashboards, and SLOs (implemented) |
+| v0.7.1 | API-availability SLO, fan-in span links, workflow load generation, dashboard error budgets (implemented) |
 | v0.8 | High availability, Kubernetes, load, and chaos testing |
