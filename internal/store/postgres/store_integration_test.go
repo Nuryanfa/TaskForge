@@ -20,6 +20,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// migrationTestBudget bounds the wait for goose's database-wide migration
+// lock: every integration test in every package migrates its own schema
+// behind it, packages run in parallel, and the queue grows with the test
+// count and under -race.
+const migrationTestBudget = 3 * time.Minute
+
 func integrationStore(t *testing.T) *Store {
 	t.Helper()
 	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
@@ -29,7 +35,7 @@ func integrationStore(t *testing.T) *Store {
 	databaseURL := isolatedDatabaseURL(t, baseURL)
 	// Migrations get their own budget: goose serializes them on one
 	// database-wide advisory lock, so parallel package runs queue here.
-	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 60*time.Second)
+	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancelMigrate()
 	if err := migrations.Run(migrateCtx, databaseURL); err != nil {
 		t.Fatal("apply integration migrations")
