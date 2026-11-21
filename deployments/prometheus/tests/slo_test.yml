@@ -382,3 +382,35 @@ tests:
       - eval_time: 75m
         alertname: TaskForgeAPIAvailabilityFastBurn
         exp_alerts: []
+
+  # The 28-day ratios behind the dashboard's error-budget panel (three hours
+  # of data is enough: rate over [28d] uses whatever the window holds).
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+1x180'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0+1x180'
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="succeeded",class="none"}'
+        values: '0+3x180'
+      - series: 'taskforge_job_outcomes_total{kind="demo.echo",outcome="dead_lettered",class="platform"}'
+        values: '0+1x180'
+      - series: 'taskforge_job_outcomes_total{kind="demo.fail",outcome="dead_lettered",class="handler"}'
+        values: '0+4x180'
+      - series: 'taskforge_job_start_delay_seconds_count{queue="default",kind="demo.echo"}'
+        values: '0+8x180'
+      - series: 'taskforge_job_start_delay_seconds_bucket{queue="default",kind="demo.echo",le="5.0"}'
+        values: '0+7x180'
+    promql_expr_test:
+      - expr: round(taskforge:api_availability_bad:ratio_rate28d, 0.0001)
+        eval_time: 180m
+        exp_samples:
+          - value: 0.5
+      - expr: round(taskforge:reliability_bad:ratio_rate28d, 0.0001)
+        eval_time: 180m
+        exp_samples:
+          - value: 0.125
+      - expr: round(taskforge:start_latency_bad:ratio_rate28d, 0.0001)
+        eval_time: 180m
+        exp_samples:
+          - value: 0.125
