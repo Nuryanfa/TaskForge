@@ -15,13 +15,18 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
+// migrationTestBudget bounds each test's wait for goose's database-wide
+// migration lock, which every integration test in every package queues on;
+// the queue grows with the test count and under -race.
+const migrationTestBudget = 3 * time.Minute
+
 func TestV01RunningJobUpgradeIntegration(t *testing.T) {
 	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
 	if baseURL == "" {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v1 := int64(1)
 	if err := run(ctx, databaseURL, &v1); err != nil {
@@ -72,7 +77,7 @@ func TestV02SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v2 := int64(2)
 	if err := run(ctx, databaseURL, &v2); err != nil {
@@ -107,7 +112,7 @@ func TestV03SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v3 := int64(3)
 	if err := run(ctx, databaseURL, &v3); err != nil {
@@ -141,7 +146,7 @@ func TestV04SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v4 := int64(4)
 	if err := run(ctx, databaseURL, &v4); err != nil {
@@ -179,7 +184,7 @@ func TestV05SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v5 := int64(5)
 	if err := run(ctx, databaseURL, &v5); err != nil {
@@ -220,7 +225,7 @@ func TestV06SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v6 := int64(6)
 	if err := run(ctx, databaseURL, &v6); err != nil {
@@ -254,7 +259,7 @@ func TestV07SchemaUpgradeIntegration(t *testing.T) {
 		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
 	}
 	databaseURL := migrationTestURL(t, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTestBudget)
 	defer cancel()
 	v7 := int64(7)
 	if err := run(ctx, databaseURL, &v7); err != nil {

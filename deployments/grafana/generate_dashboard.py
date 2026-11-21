@@ -56,8 +56,8 @@ BUDGET = [{"color": "red", "value": None}, {"color": "yellow", "value": 0}, {"co
 
 TRACE_GUIDE = """Open Jaeger at http://127.0.0.1:16686.
 
-- **API errors:** service `taskforge-api`, tag `http.response.status_code=500`.
-- **Failing or slow jobs:** service `taskforge-worker`, operation `job.attempt`, tag `error=true`.
+- **API errors (any 5xx, including 503 when the database is down):** service `taskforge-api`, tag `error=true`.
+- **Failing jobs:** service `taskforge-worker`, operation `job.attempt`, tag `error=true`. **Slow jobs:** same operation with a Min Duration (for example `5s`).
 - **A specific error log line:** every error log carries `trace_id`; paste it into Jaeger's trace ID search.
 """
 
