@@ -1,6 +1,6 @@
 # TaskForge
 
-TaskForge v0.6 is a durable PostgreSQL-backed background job platform written
+TaskForge v0.7.1 is a durable PostgreSQL-backed background job platform written
 in Go. It provides bounded leased execution, retry scheduling with deterministic
 jitter, stable execution idempotency keys, a PostgreSQL dead-letter queue,
 client-controlled delayed and recurring cron scheduling, job lifecycle events
@@ -212,8 +212,8 @@ On graceful shutdown the worker stops claiming and recovering, continues
 heartbeats while active handlers receive a bounded drain window, then cancels
 remaining local work and records a retryable `SHUTDOWN_TIMEOUT` failure. A hard
 crash cannot drain; recovery begins only after
-the lease expires. The built-in registry still supports only bounded
-`demo.echo` and never executes arbitrary user code.
+the lease expires. The built-in registry supports only the bounded demo handlers `demo.echo`,
+`demo.fail`, `demo.flaky`, and `demo.sleep`, and never executes arbitrary user code.
 
 Typed failures distinguish retryable conditions (including execution timeout
 and expired leases) from permanent failures such as invalid payloads or unknown
@@ -307,4 +307,4 @@ Start at the [documentation index](docs/README.md). Key documents:
 
 ## License
 
-No license has been selected yet. Until one is added, all rights are reserved.
+TaskForge is released under the [MIT License](LICENSE).

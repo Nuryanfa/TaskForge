@@ -1,6 +1,6 @@
 # TaskForge operations guide
 
-Operational procedures for running TaskForge v0.5 in a development or trusted
+Operational procedures for running TaskForge v0.7.1 in a development or trusted
 lab environment. TaskForge is not production ready and has no authentication.
 
 ## Deployment order
@@ -45,8 +45,10 @@ Compose performs these steps automatically with `docker compose up --build`.
 | `GET /readyz` | PostgreSQL ping succeeded within the query timeout. | Readiness / load-balancer membership. |
 | `/taskforge-api healthcheck` | Container-internal liveness probe against `127.0.0.1:8080/healthz`. | Docker healthcheck. |
 
-The worker and relay have no HTTP endpoint; monitor them through logs, job
-state, and the outbox backlog. NATS exposes `/healthz?js-enabled-only=true`
+The worker and relay serve no API. Each exposes only `GET /metrics` on its own
+listener (`TASKFORGE_METRICS_ADDR`; worker `:9102`, relay `:9103` in Compose,
+the API `:9101`); monitor them through those metrics, logs, job state, and the
+outbox backlog. NATS exposes `/healthz?js-enabled-only=true`
 on its monitoring port (8222) for container health checks.
 
 ## Log events

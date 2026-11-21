@@ -269,6 +269,7 @@ rows with `published_at IS NULL` are never deleted.
   migration (see `000002`).
 - Upgrade paths are integration-tested (`TestV01RunningJobUpgradeIntegration`,
   `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`,
-  `TestV04SchemaUpgradeIntegration`).
+  `TestV04SchemaUpgradeIntegration`, `TestV05SchemaUpgradeIntegration`,
+  `TestV06SchemaUpgradeIntegration`).
 - Add a migration file and update this document and `CURRENT_STATE.md` in the
   same change.

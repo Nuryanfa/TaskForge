@@ -45,7 +45,7 @@ tests can run in parallel against one database.
 | Stable DLQ pagination | `TestDeadLetterPaginationIsStableAndBoundedIntegration` |
 | Delayed job eligibility and idempotency | `TestNewDelayedSubmissionValidationAndFingerprint`, `TestDelayedJobClaimEligibilityAndCancellationIntegration` |
 | Cron parsing, timezone evaluation, and schedule dispatch | `TestParseCronAndNext`, `TestNewScheduleSubmissionValidationAndFingerprint`, `TestScheduleAPICreateListPauseResumeDeleteAndPrivacy`, `TestScheduleCreateReplayPauseResumeDeleteAndConcurrentDispatchIntegration` |
-| Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`, `TestV04SchemaUpgradeIntegration`, `TestV05SchemaUpgradeIntegration` |
+| Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`, `TestV04SchemaUpgradeIntegration`, `TestV05SchemaUpgradeIntegration`, `TestV06SchemaUpgradeIntegration` |
 | Bounded concurrency and shutdown | `TestRunnerNeverExceedsConfiguredConcurrency`, `TestRunnerGracefulShutdownIsBoundedAndStopsClaims` |
 | Outbox events for every transition, privacy, rollback | `TestOutboxRecordsSuccessfulLifecycleIntegration`, `TestOutboxRecordsRetryAndDeadLetterIntegration`, `TestOutboxRecordsLeaseRecoveryCancelAndScheduleIntegration`, `TestOutboxRowIsRolledBackWithTransitionIntegration` |
 | Relay batching, acked prefix, single active relay, purge | `TestPublishOutboxBatch*Integration`, `TestPurgePublishedOutboxKeepsUnpublishedIntegration`, `TestRunner*` in `internal/relay` |

@@ -82,6 +82,7 @@ cmd/
   taskforge-worker/    wiring: config → store → registry → worker.Runner
   taskforge-migrate/   wiring: config → migrations.Run
   taskforge-relay/     wiring: config → store → natsbus.Publisher → relay.Runner
+  taskforge-loadgen/   development load generator: flags → loadgen.Run against the HTTP API
 internal/
   config/              env parsing, defaults, bounds, cross-field validation
   job/                 pure domain: Job, Submission, Execution, Failure, DeadLetter,
@@ -93,6 +94,10 @@ internal/
   outbox/              event contract: subjects, message IDs, versioned body (no broker dependency)
   natsbus/             NATS adapter: JetStream stream/publisher, wake-up subscription
   relay/               outbox → JetStream loop: batching, stream setup, purge
+  telemetry/           tracer provider, attempt span rule, bounded Prometheus metrics,
+                       HTTP middleware, metrics listener, DB snapshot collector
+  tracectx/            W3C traceparent encode/decode shared by the store and telemetry
+  loadgen/             weighted job mix and paced submission (no internal dependencies)
 db/migrations/         versioned SQL files embedded into the binaries
 ```
 
@@ -118,6 +123,13 @@ flowchart TD
     relay --> postgres
     natsbus --> outbox
     postgres --> outbox
+    cmd --> telemetry
+    httpapi --> telemetry
+    worker --> telemetry
+    telemetry --> postgres
+    telemetry --> tracectx
+    postgres --> tracectx
+    loadgencmd["cmd/taskforge-loadgen"] --> loadgen
 ```
 
 `httpapi` and `worker` each declare a narrow `Store` interface containing only
