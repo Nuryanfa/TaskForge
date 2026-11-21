@@ -245,3 +245,140 @@ tests:
       - eval_time: 6m
         alertname: TaskForgeDBCollectorAbsent
         exp_alerts: []
+
+  # API availability (99.9 %): 10 % of requests fail with 500 at 600/hour,
+  # far above 14.4x the 0.1 % budget, so the page fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+9x120'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_availability
+            exp_annotations:
+              summary: API requests are failing with 5xx, burning the availability error budget fast.
+
+  # About 0.8 % 5xx over 6 hours: above 6x but below 14.4x the budget, so only
+  # the ticket-level slow burn fires.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+10x420'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0+0.08x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeAPIAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: api_availability
+            exp_annotations:
+              summary: API requests are failing with 5xx, burning the availability error budget steadily.
+
+  # 0.05 % 5xx is within the 0.1 % budget: both silent.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+10x420'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0+0.005x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeAPIAvailabilitySlowBurn
+        exp_alerts: []
+
+  # Every request fails, but only 6 per hour: below the minimum volume.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0+0.1x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeAPIAvailabilitySlowBurn
+        exp_alerts: []
+
+  # A flood of client errors (400, 409, 422) never burns the platform budget.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+10x420'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="400"}'
+        values: '0+5x420'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="409"}'
+        values: '0+5x420'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="422"}'
+        values: '0+5x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeAPIAvailabilitySlowBurn
+        exp_alerts: []
+
+  # Requests that matched no route, even 5xx, are not API availability events.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+10x420'
+      - series: 'taskforge_http_requests_total{route="unmatched",code="500"}'
+        values: '0+5x420'
+      - series: 'taskforge_http_requests_total{route="unmatched",code="404"}'
+        values: '0+5x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TaskForgeAPIAvailabilitySlowBurn
+        exp_alerts: []
+
+  # Probes do not dilute the SLI: 10 % 5xx still pages under 1000 probes/min,
+  # which would push the ratio near 0.1 % if probes counted.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+9x120'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0+1x120'
+      - series: 'taskforge_http_requests_total{route="GET /healthz",code="200"}'
+        values: '0+1000x120'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_availability
+            exp_annotations:
+              summary: API requests are failing with 5xx, burning the availability error budget fast.
+
+  # A five-minute 5xx spike (about 13 % over 5m) after an hour of clean
+  # traffic: the 1h window stays near 1.2 %, below 14.4x the budget, so the
+  # page stays silent until both windows agree.
+  - interval: 1m
+    input_series:
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="201"}'
+        values: '0+10x80'
+      - series: 'taskforge_http_requests_total{route="POST /v1/jobs",code="500"}'
+        values: '0x70 1.5+1.5x10'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TaskForgeAPIAvailabilityFastBurn
+        exp_alerts: []
