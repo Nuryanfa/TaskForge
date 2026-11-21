@@ -58,6 +58,9 @@ type Job struct {
 	// TraceLink makes attempts link to it instead of parenting (delayed jobs).
 	TraceParent *string
 	TraceLink   bool
+	// TraceLinks are extra contexts the attempt span links to: the other
+	// completed dependencies of a fan-in workflow step. Empty otherwise.
+	TraceLinks []string
 }
 
 // Execution identifies one ownership epoch. Its values must accompany every

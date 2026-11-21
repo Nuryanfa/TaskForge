@@ -43,7 +43,7 @@ func TestInvariantCheckerDetectsEarlyCompensationIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := dispatchStepJob(ctx, tx, wf.ID, locked.policy, steps[0], job.RoleCompensation); err != nil {
+	if err := dispatchStepJob(ctx, tx, wf.ID, locked.policy, steps[0], job.RoleCompensation, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	migrationfiles "github.com/Nuryanfa/TaskForge/db/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
 
 func TestV01RunningJobUpgradeIntegration(t *testing.T) {
@@ -242,6 +245,80 @@ func TestV06SchemaUpgradeIntegration(t *testing.T) {
 	}
 	if _, err := conn.Exec(ctx, `UPDATE jobs SET trace_parent='bad' WHERE id=$1`, id); err == nil {
 		t.Fatal("malformed trace_parent was accepted")
+	}
+}
+
+func TestV07SchemaUpgradeIntegration(t *testing.T) {
+	baseURL := os.Getenv("TASKFORGE_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TASKFORGE_TEST_DATABASE_URL is not set")
+	}
+	databaseURL := migrationTestURL(t, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	v7 := int64(7)
+	if err := run(ctx, databaseURL, &v7); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	const parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	jobID, workflowID := uuid.NewString(), uuid.NewString()
+	if _, err := conn.Exec(ctx, `INSERT INTO jobs(id,queue,kind,payload,payload_hash,status,trace_parent) VALUES($1,'default','demo.echo','{}',$2,'queued',$3)`, jobID, make([]byte, 32), parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO workflows(id,status,fingerprint,step_count,max_attempts,retry_initial_backoff_ms,retry_max_backoff_ms,retry_jitter_percent)
+		VALUES($1,'running',$2,1,3,1000,60000,20)`, workflowID, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO workflow_steps(workflow_id,position,name,queue,kind,priority,payload,depends_on,remaining_dependencies,status)
+		VALUES($1,0,'a','default','demo.echo',0,'{}','{}',0,'pending')`, workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	var traceParent *string
+	var links []string
+	if err := conn.QueryRow(ctx, `SELECT trace_parent, trace_links FROM jobs WHERE id=$1`, jobID).Scan(&traceParent, &links); err != nil || traceParent == nil || *traceParent != parent || len(links) != 0 {
+		t.Fatalf("existing job trace_parent=%v trace_links=%v err=%v", traceParent, links, err)
+	}
+	var stepContext *string
+	if err := conn.QueryRow(ctx, `SELECT last_attempt_trace_parent FROM workflow_steps WHERE workflow_id=$1`, workflowID).Scan(&stepContext); err != nil || stepContext != nil {
+		t.Fatalf("existing step last_attempt_trace_parent=%v err=%v", stepContext, err)
+	}
+	for _, bad := range []string{`{"not-a-traceparent"}`, `{NULL}`} {
+		if _, err := conn.Exec(ctx, `UPDATE jobs SET trace_links=$2::text[] WHERE id=$1`, jobID, bad); err == nil {
+			t.Fatalf("trace_links %s was accepted", bad)
+		}
+	}
+	if _, err := conn.Exec(ctx, `UPDATE workflow_steps SET last_attempt_trace_parent='bad' WHERE workflow_id=$1`, workflowID); err == nil {
+		t.Fatal("malformed last_attempt_trace_parent was accepted")
+	}
+	downTo(t, ctx, databaseURL, 7)
+	if err := Run(ctx, databaseURL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+}
+
+// downTo rolls the schema back to version, proving the Down section works.
+func downTo(t *testing.T, ctx context.Context, databaseURL string, version int64) {
+	t.Helper()
+	pgxConfig, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := stdlib.OpenDB(*pgxConfig)
+	defer db.Close()
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrationfiles.Files, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.DownTo(ctx, version); err != nil {
+		t.Fatalf("down to %d: %v", version, err)
 	}
 }
 

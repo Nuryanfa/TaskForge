@@ -152,7 +152,7 @@ func (s *Store) CreateWorkflow(ctx context.Context, submission job.WorkflowSubmi
 	}
 	for _, item := range steps {
 		if item.remaining == 0 {
-			if err := dispatchStepJob(queryCtx, tx, id, policy, item, job.RoleAction); err != nil {
+			if err := dispatchStepJob(queryCtx, tx, id, policy, item, job.RoleAction, nil); err != nil {
 				return job.Workflow{}, false, err
 			}
 		}
@@ -207,8 +207,9 @@ func insertStep(ctx context.Context, tx pgx.Tx, workflowID string, position int,
 
 // dispatchStepJob inserts the action or compensation job of a step and links
 // it. The unique (workflow_step_id, workflow_role) index guarantees a step is
-// never dispatched twice for the same role.
-func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy workflowPolicy, item stepRow, role string) error {
+// never dispatched twice for the same role. links become the job's
+// trace_links (fan-in dependencies other than the parent); nil for none.
+func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy workflowPolicy, item stepRow, role string, links []string) error {
 	queue, kind, priority, payload := item.queue, item.kind, item.priority, item.payload
 	if role == job.RoleCompensation {
 		queue, kind, priority, payload = *item.compensationQueue, *item.compensationKind, *item.compensationPrio, item.compensationPayload
@@ -222,12 +223,12 @@ func dispatchStepJob(ctx context.Context, tx pgx.Tx, workflowID string, policy w
 		(id, queue, kind, payload, payload_hash, status, priority, available_at,
 		execution_idempotency_key, max_attempts, retry_initial_backoff_ms, retry_max_backoff_ms,
 		retry_jitter_percent, workflow_id, workflow_step_id, workflow_role, created_at, updated_at,
-		trace_parent)
+		trace_parent, trace_links)
 		VALUES ($1, $2, $3, $4, $5, 'queued', $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14,
-		clock_timestamp(), clock_timestamp(), $15)`,
+		clock_timestamp(), clock_timestamp(), $15, COALESCE($16::text[], '{}'))`,
 		jobID, queue, kind, payload, hash[:], priority, uuid.NewString(), policy.maxAttempts,
 		policy.initialBackoffMS, policy.maxBackoffMS, policy.jitterPercent, workflowID, item.id, role,
-		tracectx.FromContext(ctx)); err != nil {
+		tracectx.FromContext(ctx), links); err != nil {
 		var pgError *pgconn.PgError
 		if errors.As(err, &pgError) && pgError.Code == "23505" {
 			return fmt.Errorf("dispatch step %s %s: %w", item.name, role, ErrStateConflict)
