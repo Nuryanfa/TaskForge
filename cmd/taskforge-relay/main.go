@@ -32,7 +32,7 @@ func main() {
 
 	process, err := telemetry.StartProcess(ctx, cfg, "taskforge-relay", "127.0.0.1:9103", logger)
 	if err != nil {
-		logger.Error("metrics_listen_failed")
+		logger.Error("telemetry_start_failed", "reason", telemetry.StartFailureReason(err))
 		os.Exit(1)
 	}
 	defer func() {

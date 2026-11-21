@@ -277,7 +277,10 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request) {
 		a.writeStoreError(w, r, err)
 		return
 	}
-	delayed := submission.RunAt != nil || submission.DelaySeconds != nil
+	// Delayed means the job was not ready at creation, the same rule the
+	// store applies for trace_link: delay_seconds 0 or a past run_at is not
+	// delayed.
+	delayed := createdJob.TraceLink
 	span.SetAttributes(attribute.String("taskforge.job.id", createdJob.ID), attribute.String("taskforge.job.kind", submission.Kind),
 		attribute.String("taskforge.job.queue", submission.Queue), attribute.Bool("taskforge.job.delayed", delayed),
 		attribute.Bool("taskforge.job.created", created))

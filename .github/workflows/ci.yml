@@ -78,11 +78,13 @@ jobs:
         run: go build ./...
 
       - name: Validate Compose
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.demo.yaml config --quiet
 
       - name: Check SLO rules
         run: |
-          docker run --rm -v "$PWD/deployments/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v3.5.0 check rules rules/slo.yml
+          docker run --rm -v "$PWD/deployments/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v3.5.0 check rules rules/slo.yml demo/slo-demo.yml
           docker run --rm -v "$PWD/deployments/prometheus:/p" -w /p/tests --entrypoint promtool prom/prometheus:v3.5.0 test rules slo_test.yml
 
       - name: Check Grafana dashboard

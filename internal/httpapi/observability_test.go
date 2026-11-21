@@ -111,3 +111,43 @@ func TestAPITracesWithoutMetrics(t *testing.T) {
 		t.Fatalf("server spans=%d, want 1", len(spans))
 	}
 }
+
+func submittedWithDelayed(t *testing.T, registry *prometheus.Registry, delayed string) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, family := range families {
+		if family.GetName() != "taskforge_jobs_submitted_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "delayed" && label.GetValue() == delayed {
+					total += metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return total
+}
+
+// TestSubmitDelayedLabelFollowsTraceLink: the delayed label uses the same
+// rule as tracing (the job was not ready at creation), so delay_seconds 0 is
+// not delayed.
+func TestSubmitDelayedLabelFollowsTraceLink(t *testing.T) {
+	telemetrytest.Setup(t)
+	store := &fakeStore{created: true, value: job.Job{ID: "00000000-0000-4000-8000-000000000001", Queue: "default", Kind: "demo.echo", Status: job.StatusQueued}}
+	handler, registry := instrumentedHandler(t, store)
+	serve(handler, http.MethodPost, "/v1/jobs", `{"kind":"demo.echo","payload":{"message":"now"},"delay_seconds":0}`)
+	if got := submittedWithDelayed(t, registry, "false"); got != 1 {
+		t.Fatalf("delay_seconds 0 counted delayed=false %v times, want 1", got)
+	}
+	store.value.TraceLink = true
+	serve(handler, http.MethodPost, "/v1/jobs", `{"kind":"demo.echo","payload":{"message":"later"},"delay_seconds":60}`)
+	if got := submittedWithDelayed(t, registry, "true"); got != 1 {
+		t.Fatalf("delay_seconds 60 counted delayed=true %v times, want 1", got)
+	}
+}

@@ -4,14 +4,18 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/Nuryanfa/TaskForge/internal/config"
 	"github.com/Nuryanfa/TaskForge/internal/telemetry/telemetrytest"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -125,52 +129,51 @@ func TestMiddlewareRouteLabels(t *testing.T) {
 	}
 }
 
-func TestServeMetricsFailsOnBusyAddress(t *testing.T) {
+// TestStartProcessFailsOnBusyAddress keeps one real-socket test for the
+// production path: a busy metrics address fails startup with ErrMetricsListen.
+func TestStartProcessFailsOnBusyAddress(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer busy.Close()
-	_, registry := newTestMetrics(t)
+	t.Setenv("TASKFORGE_METRICS_ADDR", busy.Addr().String())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := ServeMetrics(ctx, busy.Addr().String(), registry); err == nil {
-		t.Fatal("ServeMetrics succeeded on a busy address")
+	_, err = StartProcess(ctx, config.Config{}, "test", "127.0.0.1:0", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !errors.Is(err, ErrMetricsListen) {
+		t.Fatalf("StartProcess on a busy address returned %v, want ErrMetricsListen", err)
 	}
 }
 
-func TestServeMetricsServesOnlyMetrics(t *testing.T) {
+func TestStartProcessReportsTracingSetupFailure(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+	t.Setenv("TASKFORGE_METRICS_ADDR", "")
+	_, err := StartProcess(context.Background(), config.Config{OTelEndpoint: "::not a url"}, "test", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !errors.Is(err, ErrTracingSetup) {
+		t.Fatalf("StartProcess with a bad trace endpoint returned %v, want ErrTracingSetup", err)
+	}
+}
+
+// TestMetricsHandlerServesOnlyMetrics routes in memory, without a socket.
+func TestMetricsHandlerServesOnlyMetrics(t *testing.T) {
 	m, registry := newTestMetrics(t)
 	m.LeaseRecovery("recovered", 1)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	handler := metricsHandler(registry)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "taskforge_lease_recoveries_total") {
+		t.Fatalf("GET /metrics status=%d", response.Code)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serveMetricsOn(ctx, listener, registry) }()
-	base := "http://" + listener.Addr().String()
-	response, err := http.Get(base + "/metrics")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := new(strings.Builder)
-	_, _ = bufio.NewReader(response.Body).WriteTo(body)
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK || !strings.Contains(body.String(), "taskforge_lease_recoveries_total") {
-		t.Fatalf("metrics status=%d", response.StatusCode)
-	}
-	other, err := http.Get(base + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	other.Body.Close()
-	if other.StatusCode != http.StatusNotFound {
-		t.Fatalf("/ status=%d", other.StatusCode)
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("serve returned %v after shutdown", err)
+	for _, path := range []string{"/", "/healthz", "/v1/jobs"} {
+		other := httptest.NewRecorder()
+		handler.ServeHTTP(other, httptest.NewRequest(http.MethodGet, path, nil))
+		if other.Code != http.StatusNotFound {
+			t.Fatalf("GET %s status=%d, want 404", path, other.Code)
+		}
 	}
 }
 
