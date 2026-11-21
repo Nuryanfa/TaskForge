@@ -45,7 +45,7 @@ tests can run in parallel against one database.
 | Stable DLQ pagination | `TestDeadLetterPaginationIsStableAndBoundedIntegration` |
 | Delayed job eligibility and idempotency | `TestNewDelayedSubmissionValidationAndFingerprint`, `TestDelayedJobClaimEligibilityAndCancellationIntegration` |
 | Cron parsing, timezone evaluation, and schedule dispatch | `TestParseCronAndNext`, `TestNewScheduleSubmissionValidationAndFingerprint`, `TestScheduleAPICreateListPauseResumeDeleteAndPrivacy`, `TestScheduleCreateReplayPauseResumeDeleteAndConcurrentDispatchIntegration` |
-| Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`, `TestV04SchemaUpgradeIntegration`, `TestV05SchemaUpgradeIntegration`, `TestV06SchemaUpgradeIntegration` |
+| Schema upgrades with live data | `TestV01RunningJobUpgradeIntegration`, `TestV02SchemaUpgradeIntegration`, `TestV03SchemaUpgradeIntegration`, `TestV04SchemaUpgradeIntegration`, `TestV05SchemaUpgradeIntegration`, `TestV06SchemaUpgradeIntegration`, `TestV07SchemaUpgradeIntegration` |
 | Bounded concurrency and shutdown | `TestRunnerNeverExceedsConfiguredConcurrency`, `TestRunnerGracefulShutdownIsBoundedAndStopsClaims` |
 | Outbox events for every transition, privacy, rollback | `TestOutboxRecordsSuccessfulLifecycleIntegration`, `TestOutboxRecordsRetryAndDeadLetterIntegration`, `TestOutboxRecordsLeaseRecoveryCancelAndScheduleIntegration`, `TestOutboxRowIsRolledBackWithTransitionIntegration` |
 | Relay batching, acked prefix, single active relay, purge | `TestPublishOutboxBatch*Integration`, `TestPurgePublishedOutboxKeepsUnpublishedIntegration`, `TestRunner*` in `internal/relay` |
@@ -105,7 +105,7 @@ go test -race ./...
 Create the test database once with
 `docker compose exec postgres createdb -U taskforge taskforge_test`.
 
-## Observability evidence (v0.7)
+## Observability evidence (v0.7 and v0.7.1)
 
 | Test | What it proves |
 | --- | --- |
@@ -119,7 +119,11 @@ Create the test database once with
 | `TestStartDelayMeasuredFromReadinessIntegration`, `TestLeaseExpiryDeadLetterIsPlatformIntegration` | SLI semantics: readiness clock, handler vs platform class. |
 | `TestStalledWorkersRaiseOldestReadyAgeIntegration` | The stall gauge rises with no worker. |
 | `TestObserver*Integration` | Outcomes are reported only after commit, savepoint-isolated. |
-| `deployments/prometheus/tests/slo_test.yml` (`make slo-test`) | Each alert has a firing case and at least one silent case (within budget, slow burn vs page, unconfirmed short spike, below minimum volume, healthy targets); thresholds and volume gates are mutation-checked. Inputs use Prometheus 3's stored `le="5.0"` form. See [SLO.md](SLO.md) for the list. |
+| `TestFanInDispatchStoresSiblingTraceLinksIntegration`, `TestFanInDispatchSkipsDependenciesWithoutContextIntegration`, `TestFanInLinksCappedAt32Integration` | Fan-in links: the releasing dependency is the parent and never a link; others become links in order; missing contexts are skipped; more than 32 dependencies still dispatch with 32 links; compensations get none. |
+| `TestWorkflowFanInSpanLinksIntegration`, `TestStartAttemptIncludesFanInTraceLinks`, `TestStartAttemptFanInLinksInEveryParentCase` | A fan-in attempt is a child of one dependency and links to the other, on every attempt and parent case; none with tracing off. |
+| `TestMiddlewareCountsPanicAs5xx`, `TestMiddlewareCountsPanicAfterHeaderAs5xx`, `TestMiddlewareCountsPanicAfterFlushAs5xx`, `TestMiddlewareLogsAndRecordsPanic`, `TestAPIPanicReturnsErrorEnvelope` | Handler panics are 5xx for the SLI, answered with `INTERNAL_ERROR` or aborted once the response started, logged with a stack, never with the panic value. |
+| `TestMiddlewareDoesNotTraceProbes`, `TestAPITracesWithoutMetrics` | Probes are counted but untraced; tracing does not need a metrics registry. |
+| `deployments/prometheus/tests/slo_test.yml` (`make slo-test`) | Each alert has a firing case and at least one silent case (within budget, slow burn vs page, unconfirmed short spike, below minimum volume, 4xx flood, unmatched routes, healthy targets); probes do not dilute the API ratio; the 28-day ratios have `promql_expr_test` cases. Thresholds, volume gates, route filters, and 28-day rules are mutation-checked. Inputs use Prometheus 3's stored `le="5.0"` form. See [SLO.md](SLO.md) for the list. |
 
 The SLO burn demo (`make demo`, [SLO.md](SLO.md)) is a manual end-to-end
 check against real Prometheus, Grafana, and Jaeger. It found that Prometheus 3

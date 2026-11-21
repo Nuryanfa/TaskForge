@@ -39,27 +39,54 @@ def panel(kind, title, targets, x, w, h=7, unit=None, thresholds=None, descripti
     state["id"] += 1
 
 
+def text_panel(title, content, x, w, h=5):
+    panels.append({"type": "text", "title": title, "id": state["id"],
+                   "gridPos": {"h": h, "w": w, "x": x, "y": state["y"]},
+                   "options": {"mode": "markdown", "content": content}})
+    state["id"] += 1
+
+
 def next_line(h=7):
     state["y"] += h
 
 
 GREEN_RED = lambda limit: [{"color": "green", "value": None}, {"color": "red", "value": limit}]
 RED_GREEN = lambda limit: [{"color": "red", "value": None}, {"color": "green", "value": limit}]
+BUDGET = [{"color": "red", "value": None}, {"color": "yellow", "value": 0}, {"color": "green", "value": 0.25}]
+
+TRACE_GUIDE = """Open Jaeger at http://127.0.0.1:16686.
+
+- **API errors:** service `taskforge-api`, tag `http.response.status_code=500`.
+- **Failing or slow jobs:** service `taskforge-worker`, operation `job.attempt`, tag `error=true`.
+- **A specific error log line:** every error log carries `trace_id`; paste it into Jaeger's trace ID search.
+"""
 
 row("Are we meeting our SLOs?")
-panel("stat", "Start latency: share of jobs started within 5 s (target 99 %)",
-      [('1 - (sum(increase(taskforge_job_start_delay_seconds_count[$__range])) - sum(increase(taskforge_job_start_delay_seconds_bucket{le=~"5|5.0"}[$__range]))) / sum(increase(taskforge_job_start_delay_seconds_count[$__range]))', "SLI")],
-      0, 6, unit="percentunit", thresholds=RED_GREEN(0.99))
-panel("stat", "Reliability: share of jobs not lost to platform failures (target 99.5 %)",
-      [('1 - (sum(increase(taskforge_job_outcomes_total{outcome="dead_lettered",class="platform"}[$__range])) or vector(0)) / sum(increase(taskforge_job_outcomes_total{outcome=~"succeeded|dead_lettered"}[$__range]))', "SLI")],
-      6, 6, unit="percentunit", thresholds=RED_GREEN(0.995))
+panel("stat", "Start latency: share of jobs started within 5 s (target 99 %, 28 d)",
+      [("1 - taskforge:start_latency_bad:ratio_rate28d", "SLI")],
+      0, 8, unit="percentunit", thresholds=RED_GREEN(0.99))
+panel("stat", "Reliability: share of jobs not dead-lettered by the platform (target 99.5 %, 28 d)",
+      [("1 - taskforge:reliability_bad:ratio_rate28d", "SLI")],
+      8, 8, unit="percentunit", thresholds=RED_GREEN(0.995))
+panel("stat", "API availability: share of non-5xx requests (target 99.9 %, 28 d)",
+      [("1 - taskforge:api_availability_bad:ratio_rate28d", "SLI")],
+      16, 8, unit="percentunit", thresholds=RED_GREEN(0.999))
+next_line()
+panel("bargauge", "How much error budget is left? (28 d; below 0 = overspent)",
+      [("1 - taskforge:start_latency_bad:ratio_rate28d / 0.01", "start latency"),
+       ("1 - taskforge:reliability_bad:ratio_rate28d / 0.005", "reliability"),
+       ("1 - taskforge:api_availability_bad:ratio_rate28d / 0.001", "api availability")],
+      0, 8, unit="percentunit", thresholds=BUDGET)
 panel("timeseries", "How fast are we burning the error budget? (1 = exactly on budget)",
       [("taskforge:start_latency_bad:ratio_rate1h / 0.01", "start latency 1h"),
-       ("taskforge:reliability_bad:ratio_rate1h / 0.005", "reliability 1h")],
-      12, 6, thresholds=GREEN_RED(14.4))
+       ("taskforge:reliability_bad:ratio_rate1h / 0.005", "reliability 1h"),
+       ("taskforge:api_availability_bad:ratio_rate1h / 0.001", "api availability 1h")],
+      8, 8, thresholds=GREEN_RED(14.4))
 panel("table", "Which alerts are firing?",
-      [('ALERTS{alertstate="firing"}', "{{alertname}}")], 18, 6)
+      [('ALERTS{alertstate="firing"}', "{{alertname}}")], 16, 8)
 next_line()
+text_panel("From a red panel to a trace", TRACE_GUIDE, 0, 24, h=5)
+next_line(5)
 
 row("Is work piling up?")
 panel("timeseries", "How many jobs are in each state?",

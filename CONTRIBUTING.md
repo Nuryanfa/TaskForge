@@ -39,7 +39,7 @@ inside the transaction that makes a job terminal and must follow the lock
 order in ADR 0012 (job rows, then workflow rows in ascending id, then steps).
 Any new code path that moves a workflow job to a terminal status must call the
 engine, and workflow changes need tests that end with
-`assertWorkflowInvariants`. v0.7 provides connected tracing, bounded metrics, SLOs, and dashboards. New
+`assertWorkflowInvariants`. v0.7 and v0.7.1 provide connected tracing, bounded metrics, SLOs, and dashboards. New
 code paths that create jobs must pass the causing span's context to the store;
 metric labels must stay bounded (no IDs or client-chosen values); new alerts
 need `promtool` tests (`make slo-test`), and the dashboard is edited through
