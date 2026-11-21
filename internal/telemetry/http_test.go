@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -212,7 +213,7 @@ func TestMiddlewareCountsPanicAs5xx(t *testing.T) {
 // 200 header and then a truncated body, so the request is still a platform
 // failure; the connection is aborted rather than counted as a success.
 func TestMiddlewareCountsPanicAfterHeaderAs5xx(t *testing.T) {
-	telemetrytest.Setup(t)
+	exporter := telemetrytest.Setup(t)
 	m, _ := newTestMetrics(t)
 	var recovered any
 	func() {
@@ -227,6 +228,9 @@ func TestMiddlewareCountsPanicAfterHeaderAs5xx(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /boom-late", "200")); got != 0 {
 		t.Fatalf("200 count=%v, want 0", got)
+	}
+	if spans := exporter.GetSpans(); len(spans) != 1 || spans[0].Status.Code != codes.Error {
+		t.Fatalf("ended spans=%+v, want one error span", spans)
 	}
 }
 
@@ -243,5 +247,78 @@ func TestMiddlewareDoesNotTraceProbes(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /healthz", "200")); got != 1 {
 		t.Fatalf("healthz count=%v", got)
+	}
+}
+
+func flushThenPanicMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		panic("handler bug after a flush")
+	})
+	mux.HandleFunc("GET /abort", func(w http.ResponseWriter, r *http.Request) { panic(http.ErrAbortHandler) })
+	return mux
+}
+
+func recoverServe(handler http.Handler, path string) (recovered any) {
+	defer func() { recovered = recover() }()
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	return nil
+}
+
+// TestMiddlewareLogsAndRecordsPanic: a recovered panic leaves a fixed log
+// event with a stack trace and an exception event on the span, and never
+// logs the panic value (it could carry request data).
+func TestMiddlewareLogsAndRecordsPanic(t *testing.T) {
+	exporter := telemetrytest.Setup(t)
+	m, _ := newTestMetrics(t)
+	var logs bytes.Buffer
+	var wrote bool
+	handler := MiddlewareWith(m, panicMux(), MiddlewareOptions{
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		OnPanic: func(w http.ResponseWriter, r *http.Request) {
+			wrote = true
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/boom", nil))
+	if response.Code != http.StatusInternalServerError || !wrote {
+		t.Fatalf("status=%d OnPanic called=%v", response.Code, wrote)
+	}
+	text := logs.String()
+	if !strings.Contains(text, `"msg":"http_handler_panic"`) || !strings.Contains(text, `"route":"GET /boom"`) ||
+		!strings.Contains(text, `"stack":"goroutine`) || !strings.Contains(text, `"trace_id":"`) {
+		t.Fatalf("panic log=%s", text)
+	}
+	if strings.Contains(text, "handler bug") {
+		t.Fatalf("panic value leaked into the log: %s", text)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || len(spans[0].Events) != 1 || spans[0].Events[0].Name != "exception" {
+		t.Fatalf("span events=%+v, want one exception event", spans)
+	}
+}
+
+// TestMiddlewareCountsPanicAfterFlushAs5xx: a flush sends the header, so a
+// later panic must abort the connection, not try to write a 500.
+func TestMiddlewareCountsPanicAfterFlushAs5xx(t *testing.T) {
+	telemetrytest.Setup(t)
+	m, _ := newTestMetrics(t)
+	if got := recoverServe(Middleware(m, flushThenPanicMux()), "/stream"); got != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", got)
+	}
+	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /stream", "500")); got != 1 {
+		t.Fatalf("500 count=%v", got)
+	}
+}
+
+// TestMiddlewareKeepsDeliberateAbort: a handler that aborts on purpose keeps
+// aborting instead of being answered with a 500.
+func TestMiddlewareKeepsDeliberateAbort(t *testing.T) {
+	telemetrytest.Setup(t)
+	m, _ := newTestMetrics(t)
+	if got := recoverServe(Middleware(m, flushThenPanicMux()), "/abort"); got != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", got)
 	}
 }

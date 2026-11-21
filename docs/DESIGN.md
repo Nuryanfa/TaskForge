@@ -127,6 +127,8 @@ flowchart TD
     httpapi --> telemetry
     worker --> telemetry
     telemetry --> postgres
+    telemetry --> job
+    telemetry --> config
     telemetry --> tracectx
     postgres --> tracectx
     loadgencmd["cmd/taskforge-loadgen"] --> loadgen

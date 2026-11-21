@@ -1,7 +1,11 @@
 package httpapi
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +153,26 @@ func TestSubmitDelayedLabelFollowsTraceLink(t *testing.T) {
 	serve(handler, http.MethodPost, "/v1/jobs", `{"kind":"demo.echo","payload":{"message":"later"},"delay_seconds":60}`)
 	if got := submittedWithDelayed(t, registry, "true"); got != 1 {
 		t.Fatalf("delay_seconds 60 counted delayed=true %v times, want 1", got)
+	}
+}
+
+type panickingStore struct{ fakeStore }
+
+func (p *panickingStore) GetJob(context.Context, string) (job.Job, error) { panic("store bug") }
+
+// TestAPIPanicReturnsErrorEnvelope: a handler panic answers with the API's
+// usual error body (INTERNAL_ERROR, request ID) and is counted as a 500.
+func TestAPIPanicReturnsErrorEnvelope(t *testing.T) {
+	telemetrytest.Setup(t)
+	registry := prometheus.NewRegistry()
+	metrics := telemetry.NewMetrics(registry, []string{"default"})
+	handler := NewWithOptions(&panickingStore{}, Options{PayloadMaxBytes: 4096, ReadinessTimeout: time.Second, Metrics: metrics,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	response := serve(handler, http.MethodGet, "/v1/jobs/00000000-0000-4000-8000-000000000001", "")
+	if response.Code != http.StatusInternalServerError || errorCode(t, response) != "INTERNAL_ERROR" {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"request_id":"`) {
+		t.Fatalf("error body lacks the request ID: %s", response.Body.String())
 	}
 }

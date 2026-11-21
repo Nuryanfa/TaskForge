@@ -80,6 +80,7 @@ results, keys, and DSNs are never logged.
 | `worker_persist_outcome_failed` | error | W | Could not write success/failure; job will be recovered after lease expiry. |
 | `worker_recovery_failed` | error | W | Recovery transaction failed as a whole (usually database availability). |
 | `metrics_started` / `metrics_server_failed` | info / error | A W R | Metrics listener lifecycle. |
+| `http_handler_panic` | error | A | A handler panicked; the request was answered `500 INTERNAL_ERROR` (or aborted if the response had started) and counted as a 5xx. Carries `route`, `trace_id`, and `stack`, never the panic value. |
 | `telemetry_start_failed` | error | A W R | Telemetry could not start and the process exits; `reason` is `tracing` (invalid trace endpoint) or `metrics_listen` (metrics address in use or invalid). |
 | `metrics_snapshot_failed` | error | A | The database snapshot for gauges failed; the gauges disappear until the next success. |
 | `otel_export_failed` | warn | A W R | Span export failed (logged at most once a minute; counted in `taskforge_otel_export_failures_total`). |

@@ -59,7 +59,7 @@ func main() {
 			PayloadMaxBytes: cfg.JobPayloadMaxBytes, ReadinessTimeout: cfg.DatabaseQueryTimeout,
 			PageSize: cfg.DeadLetterPageSize, WorkflowMaxSteps: cfg.WorkflowMaxSteps,
 			WorkflowMaxBytes: cfg.WorkflowMaxBytes, WorkflowPageSize: cfg.WorkflowPageSize,
-			Metrics: process.Metrics,
+			Metrics: process.Metrics, Logger: logger,
 		}),
 		ReadTimeout: cfg.ReadTimeout, ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout: cfg.WriteTimeout, IdleTimeout: cfg.IdleTimeout,

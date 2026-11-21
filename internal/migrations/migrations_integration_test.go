@@ -290,7 +290,12 @@ func TestV07SchemaUpgradeIntegration(t *testing.T) {
 	if err := conn.QueryRow(ctx, `SELECT last_attempt_trace_parent FROM workflow_steps WHERE workflow_id=$1`, workflowID).Scan(&stepContext); err != nil || stepContext != nil {
 		t.Fatalf("existing step last_attempt_trace_parent=%v err=%v", stepContext, err)
 	}
-	for _, bad := range []string{`{"not-a-traceparent"}`, `{NULL}`} {
+	const sibling = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	if _, err := conn.Exec(ctx, `UPDATE jobs SET trace_links=$2::text[] WHERE id=$1`, jobID, "{"+parent+","+sibling+"}"); err != nil {
+		t.Fatalf("two well-formed links were rejected: %v", err)
+	}
+	tooMany := "{" + strings.TrimSuffix(strings.Repeat(parent+",", 33), ",") + "}"
+	for _, bad := range []string{`{"not-a-traceparent"}`, `{NULL}`, `{"` + parent + `,` + sibling + `"}`, `{{` + parent + `},{` + sibling + `}}`, tooMany} {
 		if _, err := conn.Exec(ctx, `UPDATE jobs SET trace_links=$2::text[] WHERE id=$1`, jobID, bad); err == nil {
 			t.Fatalf("trace_links %s was accepted", bad)
 		}

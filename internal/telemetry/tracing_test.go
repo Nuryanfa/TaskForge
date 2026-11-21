@@ -251,3 +251,41 @@ func TestStartAttemptIncludesFanInTraceLinks(t *testing.T) {
 		}
 	}
 }
+
+// TestStartAttemptFanInLinksInEveryParentCase: links are added whether the
+// attempt is a child, a linked root, or a new root; never while tracing is off.
+func TestStartAttemptFanInLinksInEveryParentCase(t *testing.T) {
+	const sibling = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	exporter := telemetrytest.Setup(t)
+	linked, _ := tracectx.SpanContext(sibling)
+	for name, claimed := range map[string]job.Claimed{
+		"linked root": claimedJob(stored(), true),
+		"new root":    claimedJob(nil, false),
+	} {
+		exporter.Reset()
+		claimed.Job.TraceLinks = []string{sibling}
+		_, span := StartAttempt(context.Background(), claimed)
+		span.End()
+		spans := exporter.GetSpans()
+		onlySpan(t, len(spans))
+		found := false
+		for _, link := range spans[0].Links {
+			found = found || link.SpanContext.SpanID() == linked.SpanID()
+		}
+		if !found {
+			t.Fatalf("%s: links=%+v, want the fan-in sibling", name, spans[0].Links)
+		}
+	}
+	previousProvider := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+	if _, err := SetupTracing(context.Background(), TracingConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	claimed := claimedJob(stored(), false)
+	claimed.Job.TraceLinks = []string{sibling}
+	ctx, span := StartAttempt(context.Background(), claimed)
+	span.End()
+	if trace.SpanFromContext(ctx).SpanContext().IsValid() {
+		t.Fatal("tracing disabled but the attempt carried a span context")
+	}
+}

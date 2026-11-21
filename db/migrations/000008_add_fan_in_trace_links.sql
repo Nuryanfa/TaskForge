@@ -9,15 +9,22 @@ ALTER TABLE workflow_steps
         OR last_attempt_trace_parent ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
     );
 
--- array_to_string's third argument renders NULL elements as 'NULL' so they
--- fail the pattern; without it NULLs would be skipped and '{NULL}' accepted.
+-- The element check joins the array: array_to_string's third argument renders
+-- NULL elements as 'NULL' so they fail the pattern (without it NULLs would be
+-- skipped). A traceparent is exactly 55 characters, so the joined length
+-- (56 * n - 1) proves each element holds exactly one; array_ndims rejects
+-- multi-dimensional arrays the application could not read back.
 ALTER TABLE jobs
     ADD COLUMN trace_links TEXT[] NOT NULL DEFAULT '{}' CHECK (
         cardinality(trace_links) <= 32
         AND (
             cardinality(trace_links) = 0
-            OR array_to_string(trace_links, ',', 'NULL')
-                ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}(,00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2})*$'
+            OR (
+                array_ndims(trace_links) = 1
+                AND array_to_string(trace_links, ',', 'NULL')
+                    ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}(,00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2})*$'
+                AND char_length(array_to_string(trace_links, ',', 'NULL')) = 56 * cardinality(trace_links) - 1
+            )
         )
     );
 

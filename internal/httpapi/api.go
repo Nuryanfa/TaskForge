@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"regexp"
@@ -63,8 +64,11 @@ type Options struct {
 	WorkflowMaxSteps int
 	WorkflowMaxBytes int64
 	WorkflowPageSize int
-	// Metrics enables the tracing and metrics middleware; nil disables both.
+	// Metrics receives request metrics; nil disables metrics (tracing still
+	// applies).
 	Metrics *telemetry.Metrics
+	// Logger receives the http_handler_panic event; nil uses slog.Default().
+	Logger *slog.Logger
 }
 
 type errorEnvelope struct {
@@ -205,8 +209,14 @@ func NewWithOptions(store Store, opts Options) http.Handler {
 	mux.HandleFunc("/", api.notFound)
 	// The telemetry middleware wraps the mux directly so the matched route
 	// pattern is visible to it after routing.
-	// Metrics may be nil; tracing still applies.
-	return api.withRequestID(telemetry.Middleware(opts.Metrics, mux))
+	// Metrics may be nil; tracing still applies. A handler panic answers with
+	// the usual error envelope.
+	return api.withRequestID(telemetry.MiddlewareWith(opts.Metrics, mux, telemetry.MiddlewareOptions{
+		Logger: opts.Logger,
+		OnPanic: func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+		},
+	}))
 }
 
 func (a *API) methodNotAllowed(w http.ResponseWriter, r *http.Request) {

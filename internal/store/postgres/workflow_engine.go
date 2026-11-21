@@ -200,16 +200,21 @@ func dispatchReadyDependents(ctx context.Context, tx pgx.Tx, wf workflowState, n
 	return nil
 }
 
+// maxTraceLinks matches the jobs.trace_links CHECK bound (migration 8).
+const maxTraceLinks = 32
+
 // fanInLinks returns the stored attempt contexts of a step's dependencies
 // other than the one whose completion is dispatching it (that one is the
-// parent), in depends_on order. Dependencies without a context are skipped.
+// parent), in depends_on order. Dependencies without a context are skipped,
+// and links beyond maxTraceLinks are dropped: links are best effort and must
+// never make the completing job's transaction fail.
 func fanInLinks(ctx context.Context, tx pgx.Tx, workflowID string, dependsOn []string, trigger string) ([]string, error) {
 	if len(dependsOn) < 2 {
 		return nil, nil
 	}
 	rows, err := tx.Query(ctx, `SELECT last_attempt_trace_parent FROM workflow_steps
 		WHERE workflow_id=$1 AND name = ANY($2) AND name <> $3 AND last_attempt_trace_parent IS NOT NULL
-		ORDER BY array_position($2, name)`, workflowID, dependsOn, trigger)
+		ORDER BY array_position($2, name) LIMIT $4`, workflowID, dependsOn, trigger, maxTraceLinks)
 	if err != nil {
 		return nil, classify("load fan-in contexts", err)
 	}

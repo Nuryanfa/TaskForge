@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/Nuryanfa/TaskForge/internal/job"
@@ -96,5 +97,34 @@ func TestFanInDispatchSkipsDependenciesWithoutContextIntegration(t *testing.T) {
 	}
 	if fanIn.Status != job.StepDispatched {
 		t.Fatalf("fan-in status=%v", fanIn.Status)
+	}
+}
+
+// TestFanInLinksCappedAt32Integration: a step with more completed
+// dependencies than the 32-link bound still dispatches, keeping the first 32
+// links (best effort) instead of failing the completing job forever.
+func TestFanInLinksCappedAt32Integration(t *testing.T) {
+	s := workflowStore(t, 1)
+	const roots = 35
+	steps := make([]job.WorkflowStepRequest, 0, roots+1)
+	names := make([]string, 0, roots)
+	for index := range roots {
+		name := fmt.Sprintf("r%02d", index)
+		names = append(names, name)
+		steps = append(steps, step(name, "demo.echo"))
+	}
+	steps = append(steps, step("join", "demo.echo", names...))
+	wf := submitWorkflow(t, s, steps...)
+	for index := range roots {
+		claimed := claimNext(t, s, "w")
+		value := fmt.Sprintf("00-%032x-%016x-01", index+1, index+1)
+		completeWithContext(t, s, claimed, &value)
+	}
+	join := stepByName(t, getWorkflow(t, s, wf.ID), "join")
+	if join.JobID == nil {
+		t.Fatal("fan-in step with 35 dependencies was not dispatched")
+	}
+	if _, links := jobTraceContext(t, s, *join.JobID); len(links) != 32 {
+		t.Fatalf("links=%d, want the 32-link bound", len(links))
 	}
 }
