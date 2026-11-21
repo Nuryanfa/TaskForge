@@ -100,3 +100,14 @@ func TestEnqueueSpanIsStoredAsTraceParent(t *testing.T) {
 	}
 	t.Fatal("no job.enqueue span recorded")
 }
+
+// TestAPITracesWithoutMetrics: tracing does not depend on the metrics
+// registry being configured.
+func TestAPITracesWithoutMetrics(t *testing.T) {
+	exporter := telemetrytest.Setup(t)
+	handler := NewWithOptions(&fakeStore{}, Options{PayloadMaxBytes: 4096, ReadinessTimeout: time.Second})
+	serve(handler, http.MethodGet, "/v1/jobs/00000000-0000-4000-8000-000000000001", "")
+	if spans := exporter.GetSpans(); len(spans) != 1 {
+		t.Fatalf("server spans=%d, want 1", len(spans))
+	}
+}

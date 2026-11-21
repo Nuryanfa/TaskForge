@@ -12,6 +12,7 @@ import (
 
 	"github.com/Nuryanfa/TaskForge/internal/telemetry/telemetrytest"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel/codes"
 )
 
 func testMux() *http.ServeMux {
@@ -170,5 +171,74 @@ func TestServeMetricsServesOnlyMetrics(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("serve returned %v after shutdown", err)
+	}
+}
+
+func panicMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /boom", func(w http.ResponseWriter, r *http.Request) { panic("handler bug") })
+	mux.HandleFunc("GET /boom-late", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic("handler bug after the header")
+	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {})
+	return mux
+}
+
+// TestMiddlewareCountsPanicAs5xx: a handler panic is a platform error the
+// availability SLI must see, not a silently dropped connection.
+func TestMiddlewareCountsPanicAs5xx(t *testing.T) {
+	exporter := telemetrytest.Setup(t)
+	m, _ := newTestMetrics(t)
+	response := httptest.NewRecorder()
+	Middleware(m, panicMux()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/boom", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", response.Code)
+	}
+	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /boom", "500")); got != 1 {
+		t.Fatalf("500 count=%v", got)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || spans[0].Status.Code != codes.Error {
+		t.Fatalf("spans=%d status=%+v, want one error span", len(spans), spans)
+	}
+}
+
+// TestMiddlewareCountsPanicAfterHeaderAs5xx: the client already received a
+// 200 header and then a truncated body, so the request is still a platform
+// failure; the connection is aborted rather than counted as a success.
+func TestMiddlewareCountsPanicAfterHeaderAs5xx(t *testing.T) {
+	telemetrytest.Setup(t)
+	m, _ := newTestMetrics(t)
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		Middleware(m, panicMux()).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/boom-late", nil))
+	}()
+	if recovered != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", recovered)
+	}
+	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /boom-late", "500")); got != 1 {
+		t.Fatalf("500 count=%v", got)
+	}
+	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /boom-late", "200")); got != 0 {
+		t.Fatalf("200 count=%v, want 0", got)
+	}
+}
+
+// TestMiddlewareDoesNotTraceProbes: liveness and readiness probes are still
+// counted but never start a root span.
+func TestMiddlewareDoesNotTraceProbes(t *testing.T) {
+	exporter := telemetrytest.Setup(t)
+	m, _ := newTestMetrics(t)
+	handler := Middleware(m, panicMux())
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if spans := exporter.GetSpans(); len(spans) != 0 {
+		t.Fatalf("probes produced %d spans", len(spans))
+	}
+	if got := testutil.ToFloat64(m.httpRequests.WithLabelValues("GET /healthz", "200")); got != 1 {
+		t.Fatalf("healthz count=%v", got)
 	}
 }

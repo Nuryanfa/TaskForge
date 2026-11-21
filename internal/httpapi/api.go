@@ -205,11 +205,8 @@ func NewWithOptions(store Store, opts Options) http.Handler {
 	mux.HandleFunc("/", api.notFound)
 	// The telemetry middleware wraps the mux directly so the matched route
 	// pattern is visible to it after routing.
-	var root http.Handler = mux
-	if opts.Metrics != nil {
-		root = telemetry.Middleware(opts.Metrics, mux)
-	}
-	return api.withRequestID(root)
+	// Metrics may be nil; tracing still applies.
+	return api.withRequestID(telemetry.Middleware(opts.Metrics, mux))
 }
 
 func (a *API) methodNotAllowed(w http.ResponseWriter, r *http.Request) {

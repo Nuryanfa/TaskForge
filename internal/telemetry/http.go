@@ -22,33 +22,59 @@ const unmatchedRoute = "unmatched"
 // client could force sampling or join someone else's trace); it is attached
 // as a link to a new root server span instead. It must wrap the ServeMux
 // directly so the matched route pattern is visible after routing.
+//
+// A handler panic is counted as a 500 and marks the span as an error: before
+// any header was written the client gets a bare 500; after it, the panic is
+// re-raised as http.ErrAbortHandler so net/http aborts the truncated response
+// quietly. Liveness and readiness probes are counted but never traced, so
+// frequent probes do not flood the trace store with root spans. m may be nil
+// (tracing without metrics).
 func Middleware(m *Metrics, next http.Handler) http.Handler {
 	propagator := propagation.TraceContext{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		options := []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindServer), trace.WithNewRoot()}
-		if incoming := trace.SpanContextFromContext(propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))); incoming.IsValid() {
-			options = append(options, trace.WithLinks(trace.Link{SpanContext: incoming}))
+		ctx, span := r.Context(), trace.SpanFromContext(r.Context())
+		traced := r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+		if traced {
+			options := []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindServer), trace.WithNewRoot()}
+			if incoming := trace.SpanContextFromContext(propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))); incoming.IsValid() {
+				options = append(options, trace.WithLinks(trace.Link{SpanContext: incoming}))
+			}
+			ctx, span = otel.Tracer(TracerName).Start(r.Context(), "http.request", options...)
 		}
-		ctx, span := otel.Tracer(TracerName).Start(r.Context(), "http.request", options...)
-		defer span.End()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		routed := r.WithContext(ctx)
+		defer func() {
+			recovered := recover()
+			status := recorder.status
+			if recovered != nil {
+				status = http.StatusInternalServerError
+			}
+			route := routed.Pattern
+			if route == "" || route == "/" {
+				route = unmatchedRoute
+			}
+			if traced {
+				span.SetName(route)
+				span.SetAttributes(attribute.String("http.route", route), attribute.Int("http.response.status_code", status))
+				if status >= http.StatusInternalServerError {
+					span.SetStatus(codes.Error, http.StatusText(status))
+				}
+				span.End()
+			}
+			if m != nil {
+				m.httpRequests.WithLabelValues(route, strconv.Itoa(status)).Inc()
+				m.httpDuration.WithLabelValues(route).Observe(time.Since(started).Seconds())
+			}
+			if recovered == nil {
+				return
+			}
+			if recorder.wroteHeader {
+				panic(http.ErrAbortHandler)
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+		}()
 		next.ServeHTTP(recorder, routed)
-
-		route := routed.Pattern
-		if route == "" || route == "/" {
-			route = unmatchedRoute
-		}
-		span.SetName(route)
-		span.SetAttributes(attribute.String("http.route", route), attribute.Int("http.response.status_code", recorder.status))
-		if recorder.status >= http.StatusInternalServerError {
-			span.SetStatus(codes.Error, http.StatusText(recorder.status))
-		}
-		if m != nil {
-			m.httpRequests.WithLabelValues(route, strconv.Itoa(recorder.status)).Inc()
-			m.httpDuration.WithLabelValues(route).Observe(time.Since(started).Seconds())
-		}
 	})
 }
 
